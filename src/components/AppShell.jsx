@@ -27,7 +27,15 @@ export default function AppShell({ children }) {
     } finally { setUploading(false); }
   };
 
-  const photoSrc = user?.profile_photo ? `http://localhost:5000${user.profile_photo}` : null;
+  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  // New photos: profile_photo is a full Cloudinary URL — use directly.
+  // Legacy photos: profile_photo is a bare filename — serve via auth endpoint.
+  const photoFilename = user?.profile_photo?.split('/').pop();
+  const photoSrc = user?.profile_photo
+    ? user.profile_photo.startsWith('http')
+      ? user.profile_photo
+      : `${API_BASE}/auth/photo/${photoFilename}`
+    : null;
 
   const navItems = [
     { icon: '🏠', label: 'Home',     path: '/dashboard' },

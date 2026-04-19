@@ -1,13 +1,25 @@
 import axios from 'axios';
 
+// ── In-memory token store ─────────────────────────────────────────────────────
+// Access token lives ONLY in module memory — never written to localStorage.
+// This eliminates the XSS-to-token-theft attack vector entirely.
+// Persistence across page reloads is handled by the HttpOnly refresh cookie
+// (silently refreshed in AuthContext on mount).
+let _token = null;
+
+export function setAccessToken(token) { _token = token; }
+export function clearAccessToken()    { _token = null;  }
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api',
   withCredentials: true,
 });
 
+// Attach token from memory — never from localStorage
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (_token) config.headers.Authorization = `Bearer ${_token}`;
   return config;
 });
 
@@ -29,13 +41,14 @@ api.interceptors.response.use(
             {},
             { withCredentials: true }
           );
-          localStorage.setItem('token', data.token);
+          // Store new token in memory only — no localStorage
+          setAccessToken(data.token);
           isRefreshing = false;
           original.headers.Authorization = `Bearer ${data.token}`;
           return api(original);
         } catch (refreshErr) {
           isRefreshing = false;
-          localStorage.removeItem('token');
+          clearAccessToken();
           localStorage.removeItem('user');
           window.location.href = '/login';
           return Promise.reject(refreshErr);

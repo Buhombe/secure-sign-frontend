@@ -12,7 +12,15 @@ export default function Settings() {
   const [pwError, setPwError] = useState('');
   const photoRef = useRef();
 
-  const photoSrc = user?.profile_photo ? `http://localhost:5000${user.profile_photo}` : null;
+  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+  // New photos: profile_photo is a full Cloudinary URL — use directly.
+  // Legacy photos: profile_photo is a bare filename — serve via auth endpoint.
+  const photoFilename = user?.profile_photo?.split('/').pop();
+  const photoSrc = user?.profile_photo
+    ? user.profile_photo.startsWith('http')
+      ? user.profile_photo
+      : `${API_BASE}/auth/photo/${photoFilename}`
+    : null;
 
   const handlePhotoChange = async (e) => {
     const file = e.target.files[0];
