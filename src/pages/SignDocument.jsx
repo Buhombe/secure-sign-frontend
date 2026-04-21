@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import SignatureCanvas from 'react-signature-canvas';
 import api from '../services/api';
 
@@ -8,8 +8,22 @@ const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 export default function SignDocument() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-  const recipientToken = searchParams.get('token');
+
+  // Token is delivered via URL fragment (#token=...) — never the query string.
+  // Fragments are NOT sent to the server, NOT stored in server/CDN/proxy logs,
+  // and are stripped from Referer headers by all browsers.
+  // We read once on mount then immediately clear the fragment so it does not
+  // persist in browser history or appear in screenshots / copy-paste.
+  const [recipientToken] = useState(() => {
+    const hash = window.location.hash;          // e.g. "#token=abc-123-..."
+    if (!hash.startsWith('#token=')) return null;
+    const raw = decodeURIComponent(hash.slice('#token='.length));
+    // Replace current history entry — no back-button leakage
+    window.history.replaceState(
+      null, '', window.location.pathname + window.location.search
+    );
+    return raw || null;
+  });
 
   const [doc, setDoc] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -34,13 +48,7 @@ export default function SignDocument() {
   useEffect(() => {
     const load = async () => {
       try {
-        // Fetch document metadata
-        const config = recipientToken ? { params: { token: recipientToken } } : {};
-        const { data } = await api.get(`/documents/${id}`, config);
-        setDoc(data.document);
-
-        // Fetch PDF — backend now redirects to Cloudinary URL
-        // Use { redirect: 'follow' } so fetch follows the 302 redirect
+        // Fetch PDF first — works for both public and authenticated flows
         const token = localStorage.getItem('token');
         const url = recipientToken
           ? `${API_BASE}/documents/${id}/serve/public?token=${recipientToken}`
@@ -54,9 +62,19 @@ export default function SignDocument() {
         const arrayBuffer = await r.arrayBuffer();
         const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
         setPdfUrl(URL.createObjectURL(blob));
+
+        // Fetch document metadata — only for authenticated users
+        // Public signers (recipientToken) skip this to avoid JWT requirement
+        if (!recipientToken && token) {
+          const { data } = await api.get(`/documents/${id}`);
+          setDoc(data.document);
+        } else if (recipientToken) {
+          // Set a minimal doc object for display — name fetched from PDF filename
+          setDoc({ original_name: 'Document to Sign', status: 'pending' });
+        }
       } catch (e) {
         console.error(e);
-        setError('Could not load document.');
+        setError('Could not load document. The signing link may have expired.');
       } finally {
         setLoading(false);
       }
@@ -147,41 +165,58 @@ export default function SignDocument() {
       const xPct = (sigPos.x / cw) * 100;
       const yPct = (sigPos.y / ch) * 100;
 
-      // Get signer email — from URL param or logged in user
-      const urlParams = new URLSearchParams(window.location.search);
-      const signerEmailFromUrl = urlParams.get('signer');
-      const loggedInUser = localStorage.getItem('user') 
-        ? JSON.parse(localStorage.getItem('user')).email 
-        : null;
-      const signerEmail = signerEmailFromUrl || loggedInUser || '';
+      // Identity is proven by ONE of:
+      //   (a) recipientToken from URL fragment — public flow (already read + fragment cleared on mount)
+      //   (b) JWT from localStorage — authenticated flow
+      // The client NEVER sends a signerEmail — server is sole source of truth.
+      const signingToken  = recipientToken;
+      const loggedInToken = localStorage.getItem('token');
 
-      if (!signerEmail) {
-        setError('Could not determine signer email.');
+      let response;
+      if (signingToken) {
+        // Public flow: token in body proves identity.
+        response = await fetch(`${API_BASE}/signers/${id}/sign-public`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: signingToken,
+            signatureData: sigImage,
+            sigX: xPct,
+            sigY: yPct,
+            sigWidth:  sigPos.w,
+            sigHeight: sigPos.h,
+            pageNumber: 1,
+          }),
+        });
+      } else if (loggedInToken) {
+        // Authenticated flow: JWT proves identity.
+        response = await fetch(`${API_BASE}/signers/${id}/sign`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${loggedInToken}`,
+          },
+          body: JSON.stringify({
+            signatureData: sigImage,
+            sigX: xPct,
+            sigY: yPct,
+            sigWidth:  sigPos.w,
+            sigHeight: sigPos.h,
+            pageNumber: 1,
+          }),
+        });
+      } else {
+        setError('You must be signed in or use a valid signing link.');
         setSaving(false);
         return;
       }
-
-      // Use public endpoint (no auth required)
-      const response = await fetch(`${API_BASE}/signers/${id}/sign-public`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          signatureData: sigImage,
-          sigX: xPct,
-          sigY: yPct,
-          sigWidth: sigPos.w,
-          sigHeight: sigPos.h,
-          pageNumber: 1,
-          signerEmail,
-        }),
-      });
 
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Signing failed.');
 
       setStep(4);
     } catch (e) {
-      setError(e.response?.data?.error || 'Signing failed. Please try again.');
+      setError(e.response?.data?.error || e.message || 'Signing failed. Please try again.');
     } finally {
       setSaving(false);
     }
