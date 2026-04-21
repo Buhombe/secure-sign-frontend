@@ -42,6 +42,7 @@ export default function AppShell({ children }) {
     { icon: '📂', label: 'Manage',   path: '/manage' },
     { icon: '⬆️', label: 'Upload',   path: '/upload' },
     { icon: '📊', label: 'Reports',  path: '/audit' },
+    { icon: '💳', label: 'Pricing',  path: '/pricing' },
     { icon: '⚙️', label: 'Settings', path: '/settings' },
   ];
 

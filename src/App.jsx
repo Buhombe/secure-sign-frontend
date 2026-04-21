@@ -9,6 +9,9 @@ import ViewDocument from './pages/ViewDocument';
 import SignDocument from './pages/SignDocument';
 import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
+import VerifyEmail from './pages/VerifyEmail';
+import ResetPassword from './pages/ResetPassword';
+import Pricing from './pages/Pricing';
 
 export default function App() {
   return (
@@ -16,7 +19,10 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/pricing" element={<Pricing />} />
           <Route path="/sign/:id" element={<SignDocument />} />
+          <Route path="/verify-email" element={<VerifyEmail />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/manage" element={<ProtectedRoute><Manage /></ProtectedRoute>} />
           <Route path="/upload" element={<ProtectedRoute><Upload /></ProtectedRoute>} />
