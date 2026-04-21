@@ -1,79 +1,47 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import SignatureCanvas from 'react-signature-canvas';
-import api from '../services/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 export default function SignDocument() {
-  const { id } = useParams();
-  const navigate = useNavigate();
+  const { id }      = useParams();
+  const navigate    = useNavigate();
 
-  // Token is delivered via URL fragment (#token=...) — never the query string.
-  // Fragments are NOT sent to the server, NOT stored in server/CDN/proxy logs,
-  // and are stripped from Referer headers by all browsers.
-  // We read once on mount then immediately clear the fragment so it does not
-  // persist in browser history or appear in screenshots / copy-paste.
   const [recipientToken] = useState(() => {
-    const hash = window.location.hash;          // e.g. "#token=abc-123-..."
+    const hash = window.location.hash;
     if (!hash.startsWith('#token=')) return null;
     const raw = decodeURIComponent(hash.slice('#token='.length));
-    // Replace current history entry — no back-button leakage
-    window.history.replaceState(
-      null, '', window.location.pathname + window.location.search
-    );
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
     return raw || null;
   });
 
-  const [doc, setDoc] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [step, setStep] = useState(1);
-  const [sigMode, setSigMode] = useState('draw');
-  const [typedSig, setTypedSig] = useState('');
-  const [sigFont, setSigFont] = useState('Dancing Script');
-  const [sigImage, setSigImage] = useState(null);
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  const [pdfUrl, setPdfUrl] = useState('');
-  const [sigPos, setSigPos] = useState({ x: 50, y: 70, w: 220, h: 80 });
-  const [dragging, setDragging] = useState(false);
-  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const [pdfUrl,    setPdfUrl]    = useState('');
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState('');
+  const [done,      setDone]      = useState(false);
+  const [saving,    setSaving]    = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [sigMode,   setSigMode]   = useState('draw');
+  const [typedSig,  setTypedSig]  = useState('');
+  const [sigFont,   setSigFont]   = useState('Dancing Script');
 
   const sigCanvasRef = useRef();
-  const pdfContainerRef = useRef();
-  const sigBoxRef = useRef();
 
-  // ── Load document + PDF ───────────────────────────────────────────────────
   useEffect(() => {
     const load = async () => {
       try {
-        // Fetch PDF first — works for both public and authenticated flows
         const token = localStorage.getItem('token');
-        const url = recipientToken
+        const url   = recipientToken
           ? `${API_BASE}/documents/${id}/serve/public?token=${recipientToken}`
           : `${API_BASE}/documents/${id}/serve`;
-
         const headers = {};
         if (token && !recipientToken) headers['Authorization'] = `Bearer ${token}`;
-
         const r = await fetch(url, { headers });
         if (!r.ok) throw new Error('Failed to fetch PDF');
-        const arrayBuffer = await r.arrayBuffer();
-        const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+        const blob = new Blob([await r.arrayBuffer()], { type: 'application/pdf' });
         setPdfUrl(URL.createObjectURL(blob));
-
-        // Fetch document metadata — only for authenticated users
-        // Public signers (recipientToken) skip this to avoid JWT requirement
-        if (!recipientToken && token) {
-          const { data } = await api.get(`/documents/${id}`);
-          setDoc(data.document);
-        } else if (recipientToken) {
-          // Set a minimal doc object for display — name fetched from PDF filename
-          setDoc({ original_name: 'Document to Sign', status: 'pending' });
-        }
       } catch (e) {
-        console.error(e);
         setError('Could not load document. The signing link may have expired.');
       } finally {
         setLoading(false);
@@ -82,12 +50,10 @@ export default function SignDocument() {
     load();
   }, [id]);
 
-  // ── Typed signature renderer ──────────────────────────────────────────────
   const renderTypedSig = useCallback(() => {
     const canvas = document.createElement('canvas');
     canvas.width = 440; canvas.height = 120;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, 440, 120);
     ctx.font = `64px '${sigFont}', cursive`;
     ctx.fillStyle = '#1e293b';
     ctx.textAlign = 'center';
@@ -96,7 +62,7 @@ export default function SignDocument() {
     return canvas.toDataURL('image/png');
   }, [typedSig, sigFont]);
 
-  const handleStep1Next = () => {
+  const handleApply = () => {
     let img = null;
     if (sigMode === 'draw') {
       if (!sigCanvasRef.current || sigCanvasRef.current.isEmpty()) {
@@ -104,138 +70,74 @@ export default function SignDocument() {
       }
       img = sigCanvasRef.current.getCanvas().toDataURL('image/png');
     } else {
-      if (!typedSig.trim()) { setError('Please enter your name.'); return; }
+      if (!typedSig.trim()) { setError('Please type your name.'); return; }
       img = renderTypedSig();
     }
     setError('');
-    setSigImage(img);
-    setStep(2);
+    setShowModal(false);
+    handleSign(img);
   };
 
-  // ── Drag handlers ─────────────────────────────────────────────────────────
-  const handleMouseDown = (e) => {
-    e.preventDefault();
-    const rect = sigBoxRef.current.getBoundingClientRect();
-    setDragOffset({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    setDragging(true);
-  };
-
-  const handleTouchStart = (e) => {
-    const touch = e.touches[0];
-    const rect = sigBoxRef.current.getBoundingClientRect();
-    setDragOffset({ x: touch.clientX - rect.left, y: touch.clientY - rect.top });
-    setDragging(true);
-  };
-
-  useEffect(() => {
-    if (!dragging) return;
-    const move = (e) => {
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-      const container = pdfContainerRef.current;
-      if (!container) return;
-      const rect = container.getBoundingClientRect();
-      let nx = clientX - rect.left - dragOffset.x;
-      let ny = clientY - rect.top - dragOffset.y;
-      nx = Math.max(0, Math.min(nx, rect.width - sigPos.w));
-      ny = Math.max(0, Math.min(ny, rect.height - sigPos.h));
-      setSigPos(p => ({ ...p, x: nx, y: ny }));
-    };
-    const up = () => setDragging(false);
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    window.addEventListener('touchmove', move, { passive: false });
-    window.addEventListener('touchend', up);
-    return () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      window.removeEventListener('touchmove', move);
-      window.removeEventListener('touchend', up);
-    };
-  }, [dragging, dragOffset, sigPos.w, sigPos.h]);
-
-  // ── Submit signature ──────────────────────────────────────────────────────
-  const handleConfirmSign = async () => {
+  const handleSign = async (img) => {
     setSaving(true);
     setError('');
     try {
-      const container = pdfContainerRef.current;
-      const cw = container?.offsetWidth || 600;
-      const ch = container?.offsetHeight || 800;
-      const xPct = (sigPos.x / cw) * 100;
-      const yPct = (sigPos.y / ch) * 100;
-
-      // Identity is proven by ONE of:
-      //   (a) recipientToken from URL fragment — public flow (already read + fragment cleared on mount)
-      //   (b) JWT from localStorage — authenticated flow
-      // The client NEVER sends a signerEmail — server is sole source of truth.
-      const signingToken  = recipientToken;
-      const loggedInToken = localStorage.getItem('token');
-
+      const token = localStorage.getItem('token');
       let response;
-      if (signingToken) {
-        // Public flow: token in body proves identity.
+      if (recipientToken) {
         response = await fetch(`${API_BASE}/signers/${id}/sign-public`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token: signingToken,
-            signatureData: sigImage,
-            sigX: xPct,
-            sigY: yPct,
-            sigWidth:  sigPos.w,
-            sigHeight: sigPos.h,
-            pageNumber: 1,
-          }),
+          body: JSON.stringify({ token: recipientToken, signatureData: img, sigX: 10, sigY: 80, sigWidth: 220, sigHeight: 70, pageNumber: 1 }),
         });
-      } else if (loggedInToken) {
-        // Authenticated flow: JWT proves identity.
+      } else if (token) {
         response = await fetch(`${API_BASE}/signers/${id}/sign`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${loggedInToken}`,
-          },
-          body: JSON.stringify({
-            signatureData: sigImage,
-            sigX: xPct,
-            sigY: yPct,
-            sigWidth:  sigPos.w,
-            sigHeight: sigPos.h,
-            pageNumber: 1,
-          }),
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ signatureData: img, sigX: 10, sigY: 80, sigWidth: 220, sigHeight: 70, pageNumber: 1 }),
         });
       } else {
         setError('You must be signed in or use a valid signing link.');
         setSaving(false);
         return;
       }
-
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Signing failed.');
-
-      setStep(4);
+      setDone(true);
     } catch (e) {
-      setError(e.response?.data?.error || e.message || 'Signing failed. Please try again.');
+      setError(e.message || 'Signing failed. Please try again.');
     } finally {
       setSaving(false);
     }
   };
 
-  // ── Render ────────────────────────────────────────────────────────────────
-  if (loading) return <div style={s.center}>Loading document...</div>;
-  if (error && !doc) return <div style={s.center}>{error}</div>;
-
-  if (step === 4) return (
-    <div style={s.center}>
-      <div style={{ textAlign: 'center', maxWidth: 400 }}>
-        <div style={{ fontSize: '4rem', marginBottom: '1rem' }}>🎉</div>
+  if (done) return (
+    <div style={s.page}>
+      <div style={s.successCard}>
+        <div style={{ fontSize: '3.5rem', marginBottom: '1rem' }}>✅</div>
         <h2 style={{ fontSize: '1.4rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.5rem' }}>Document Signed!</h2>
-        <p style={{ color: '#64748b', marginBottom: '1.5rem' }}>{doc?.original_name} has been signed successfully.</p>
-        <button onClick={() => navigate(recipientToken ? '/login' : '/dashboard')}
-          style={{ padding: '0.75rem 1.5rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '1rem' }}>
-          {recipientToken ? 'Done' : 'Back to Dashboard'}
+        <p style={{ color: '#64748b', marginBottom: '1.5rem' }}>Your signature has been applied and recorded securely.</p>
+        <button onClick={() => navigate(recipientToken ? '/login' : '/dashboard')} style={s.btnPrimary}>
+          {recipientToken ? 'Done' : 'Go to Dashboard'}
         </button>
+      </div>
+    </div>
+  );
+
+  if (loading) return (
+    <div style={s.page}>
+      <div style={{ textAlign: 'center' }}>
+        <div style={s.spinner} />
+        <p style={{ color: '#64748b', marginTop: '1rem' }}>Loading document...</p>
+      </div>
+    </div>
+  );
+
+  if (error && !pdfUrl) return (
+    <div style={s.page}>
+      <div style={{ textAlign: 'center', background: 'white', borderRadius: 16, padding: '2rem', maxWidth: 380 }}>
+        <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>⚠️</div>
+        <p style={{ color: '#dc2626', fontWeight: 600 }}>{error}</p>
       </div>
     </div>
   );
@@ -243,166 +145,105 @@ export default function SignDocument() {
   const fonts = ['Dancing Script', 'Pacifico', 'Great Vibes', 'Caveat'];
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f8fafc', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', background: '#475569', display: 'flex', flexDirection: 'column' }}>
+
       {/* Top bar */}
-      <div style={{ background: 'white', borderBottom: '1px solid #e5e7eb', padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
-        {step > 1 && (
-          <button onClick={() => setStep(step - 1)}
-            style={{ padding: '0.4rem 0.9rem', background: '#f1f5f9', border: 'none', borderRadius: 7, cursor: 'pointer', fontWeight: 600, fontSize: '0.875rem' }}>
-            ← Back
-          </button>
-        )}
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 700, color: '#0f172a', fontSize: '0.95rem' }}>📄 {doc?.original_name}</div>
+      <div style={{ background: '#1a3a5c', padding: '0.75rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <div style={{ width: 36, height: 36, background: 'rgba(255,255,255,0.15)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.1rem' }}>✍️</div>
+          <div>
+            <div style={{ color: 'white', fontWeight: 800, fontSize: '1rem' }}>SecureSign</div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '0.7rem' }}>Document Signing</div>
+          </div>
         </div>
-        {/* Step indicator */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          {['Create Signature', 'Place Signature', 'Confirm'].map((label, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-              <div style={{
-                width: 24, height: 24, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: step > i + 1 ? '#16a34a' : step === i + 1 ? '#2563eb' : '#e5e7eb',
-                color: step >= i + 1 ? 'white' : '#94a3b8', fontSize: '0.72rem', fontWeight: 700,
-              }}>{step > i + 1 ? '✓' : i + 1}</div>
-              {i < 2 && <div style={{ width: 24, height: 1, background: '#e5e7eb' }} />}
-            </div>
-          ))}
+        <div style={{ color: 'rgba(255,255,255,0.7)', fontSize: '0.8rem' }}>
+          🔒 Secured with cryptographic signature
         </div>
       </div>
 
-      {error && (
-        <div style={{ background: '#fee2e2', color: '#dc2626', padding: '0.75rem 1.5rem', fontSize: '0.875rem', textAlign: 'center' }}>
-          {error}
+      {/* Info bar */}
+      {!saving && !error && (
+        <div style={{ background: '#fff7ed', borderBottom: '1px solid #fed7aa', padding: '0.65rem 1.5rem', fontSize: '0.875rem', color: '#92400e' }}>
+          Please review the document, then click <strong>Sign Document</strong> to proceed.
+        </div>
+      )}
+      {error && <div style={{ background: '#fee2e2', color: '#dc2626', padding: '0.6rem 1.5rem', fontSize: '0.85rem', textAlign: 'center' }}>{error}</div>}
+      {saving && (
+        <div style={{ background: '#eff6ff', borderBottom: '1px solid #bfdbfe', padding: '0.6rem 1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.875rem', color: '#1d4ed8', justifyContent: 'center' }}>
+          <div style={s.spinnerSm} /> Applying your signature...
         </div>
       )}
 
-      {/* STEP 1 — Create signature */}
-      {step === 1 && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1rem' }}>
-          <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e5e7eb', padding: '2rem', width: '100%', maxWidth: 540, boxShadow: '0 4px 24px rgba(0,0,0,0.08)' }}>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.25rem' }}>Create Your Signature</h2>
-            <p style={{ fontSize: '0.8rem', color: '#64748b', marginBottom: '1.5rem' }}>Choose how you'd like to sign</p>
+      {/* PDF */}
+      <div style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', padding: '1rem' }}>
+        <iframe src={pdfUrl} style={{ width: '100%', maxWidth: 860, height: 'calc(100vh - 200px)', minHeight: 400, border: 'none', borderRadius: 4, background: 'white', display: 'block' }} title="Document" />
+      </div>
 
-            {/* Mode tabs */}
-            <div style={{ display: 'flex', background: '#f1f5f9', borderRadius: 9, padding: 3, marginBottom: '1.5rem', gap: 3 }}>
-              {[{ id: 'draw', label: '✏️ Draw' }, { id: 'type', label: '⌨️ Type' }, { id: 'style', label: '🎨 Style' }].map(m => (
+      {/* Bottom action bar */}
+      <div style={{ background: 'white', borderTop: '2px solid #e5e7eb', padding: '1rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '1.5rem', flexWrap: 'wrap' }}>
+        <button onClick={() => { setError(''); setShowModal(true); }} disabled={saving}
+          style={{ padding: '0.9rem 2.5rem', background: '#f59e0b', color: 'white', border: 'none', borderRadius: 8, fontWeight: 800, fontSize: '1rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.6rem', boxShadow: '0 4px 12px rgba(245,158,11,0.35)' }}>
+          ✍️ Sign Document
+        </button>
+      </div>
+
+      {/* Signature Modal */}
+      {showModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: '1rem' }}>
+          <div style={{ background: 'white', borderRadius: 16, width: '100%', maxWidth: 520, boxShadow: '0 24px 64px rgba(0,0,0,0.3)', overflow: 'hidden' }}>
+
+            <div style={{ padding: '1.5rem 1.5rem 0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+              <div>
+                <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a' }}>Add Your Signature</div>
+                <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: 2 }}>Draw or type your signature below</div>
+              </div>
+              <button onClick={() => setShowModal(false)} style={{ background: '#f1f5f9', border: 'none', width: 32, height: 32, borderRadius: '50%', cursor: 'pointer', fontSize: '0.9rem', color: '#64748b' }}>✕</button>
+            </div>
+
+            <div style={{ display: 'flex', gap: 4, padding: '1rem 1.5rem 0', borderBottom: '1px solid #f1f5f9' }}>
+              {[{ id: 'draw', label: '✏️ Draw' }, { id: 'type', label: '⌨️ Type' }].map(m => (
                 <button key={m.id} onClick={() => { setSigMode(m.id); setError(''); }}
-                  style={{ flex: 1, padding: '0.5rem', border: 'none', borderRadius: 7, background: sigMode === m.id ? 'white' : 'transparent', color: sigMode === m.id ? '#2563eb' : '#64748b', fontWeight: sigMode === m.id ? 700 : 500, fontSize: '0.85rem', cursor: 'pointer', boxShadow: sigMode === m.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none' }}>
+                  style={{ padding: '0.5rem 1.25rem', border: 'none', background: 'transparent', cursor: 'pointer', fontSize: '0.875rem', fontWeight: sigMode === m.id ? 700 : 500, color: sigMode === m.id ? '#2563eb' : '#64748b', borderBottom: `2px solid ${sigMode === m.id ? '#2563eb' : 'transparent'}`, marginBottom: -1 }}>
                   {m.label}
                 </button>
               ))}
             </div>
 
-            {sigMode === 'draw' && (
-              <div>
-                <div style={{ border: '1.5px solid #e2e8f0', borderRadius: 10, background: '#fafafa', overflow: 'hidden', marginBottom: '0.75rem' }}>
-                  <SignatureCanvas ref={sigCanvasRef} penColor="#1e293b"
-                    canvasProps={{ style: { width: '100%', height: 160, display: 'block', touchAction: 'none' } }} />
-                  <div style={{ borderTop: '1px dashed #e2e8f0', textAlign: 'center', padding: '0.35rem', fontSize: '0.7rem', color: '#94a3b8' }}>
-                    Sign here with your mouse or finger
+            <div style={{ padding: '1.25rem 1.5rem' }}>
+              {sigMode === 'draw' && (
+                <>
+                  <div style={{ border: '1.5px solid #e2e8f0', borderRadius: 8, background: '#fafafa', overflow: 'hidden', marginBottom: '0.5rem' }}>
+                    <SignatureCanvas ref={sigCanvasRef} penColor="#1e3a5f"
+                      canvasProps={{ style: { width: '100%', height: 150, display: 'block', touchAction: 'none' } }} />
                   </div>
-                </div>
-                <button onClick={() => sigCanvasRef.current?.clear()}
-                  style={{ padding: '0.35rem 0.75rem', background: '#f1f5f9', border: '1px solid #e5e7eb', borderRadius: 7, cursor: 'pointer', fontSize: '0.8rem', color: '#374151' }}>
-                  Clear
-                </button>
-              </div>
-            )}
-
-            {sigMode === 'type' && (
-              <div>
-                <input value={typedSig} onChange={e => setTypedSig(e.target.value)} placeholder="Type your full name"
-                  style={{ width: '100%', padding: '0.75rem', border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: '0.9rem', outline: 'none', marginBottom: '1rem' }} />
-                <div style={{ border: '1.5px solid #e2e8f0', borderRadius: 10, background: '#fafafa', padding: '1rem', textAlign: 'center', marginBottom: '0.75rem', minHeight: 80, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <span style={{ fontFamily: `'${sigFont}', cursive`, fontSize: '2.5rem', color: '#1e293b' }}>{typedSig || 'Your Name'}</span>
-                </div>
-              </div>
-            )}
-
-            {sigMode === 'style' && (
-              <div>
-                <input value={typedSig} onChange={e => setTypedSig(e.target.value)} placeholder="Type your full name"
-                  style={{ width: '100%', padding: '0.75rem', border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: '0.9rem', outline: 'none', marginBottom: '1rem' }} />
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem' }}>
-                  {fonts.map(f => (
-                    <div key={f} onClick={() => { setSigFont(f); setSigMode('type'); }}
-                      style={{ border: `2px solid ${sigFont === f ? '#2563eb' : '#e2e8f0'}`, borderRadius: 8, padding: '0.75rem', background: sigFont === f ? '#eff6ff' : '#fafafa', cursor: 'pointer', textAlign: 'center' }}>
-                      <span style={{ fontFamily: `'${f}', cursive`, fontSize: '1.5rem', color: '#1e293b' }}>{typedSig || 'Signature'}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <button onClick={handleStep1Next}
-              style={{ width: '100%', marginTop: '1.5rem', padding: '0.75rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 9, fontWeight: 700, fontSize: '0.95rem', cursor: 'pointer' }}>
-              Continue — Place Signature →
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* STEP 2 — Place signature on PDF */}
-      {step === 2 && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ background: '#1e293b', color: '#94a3b8', padding: '0.6rem 1.5rem', fontSize: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <span>📍 Drag the signature box to where you want it on the document</span>
-            <button onClick={() => setStep(3)}
-              style={{ padding: '0.4rem 1rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 7, fontWeight: 700, fontSize: '0.8rem', cursor: 'pointer' }}>
-              Confirm Placement →
-            </button>
-          </div>
-          <div style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: '0.75rem', background: '#334155' }}>
-            <div ref={pdfContainerRef} style={{ position: 'relative', display: 'inline-block', width: '100%', maxWidth: 700, userSelect: 'none' }}>
-              <iframe src={pdfUrl} style={{ width: '100%', height: '75vh', minHeight: 400, border: 'none', display: 'block', borderRadius: 4 }} title="PDF" />
-              <div ref={sigBoxRef} onMouseDown={handleMouseDown} onTouchStart={handleTouchStart}
-                style={{ position: 'absolute', left: sigPos.x, top: sigPos.y, width: sigPos.w, height: sigPos.h, border: '2px dashed #2563eb', borderRadius: 6, background: 'rgba(239,246,255,0.9)', cursor: dragging ? 'grabbing' : 'grab', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 16px rgba(37,99,235,0.25)', zIndex: 10, touchAction: 'none' }}>
-                <img src={sigImage} alt="sig" style={{ maxWidth: '90%', maxHeight: '85%', objectFit: 'contain' }} />
-                <div style={{ position: 'absolute', top: -20, left: 0, fontSize: '0.65rem', color: '#2563eb', fontWeight: 600, whiteSpace: 'nowrap', background: 'white', padding: '1px 6px', borderRadius: 4, border: '1px solid #bfdbfe' }}>
-                  ✥ Drag to reposition
-                </div>
-              </div>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8', textAlign: 'center', marginBottom: '0.5rem' }}>Sign using your mouse or finger</div>
+                  <button onClick={() => sigCanvasRef.current?.clear()} style={{ padding: '0.3rem 0.75rem', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', color: '#374151' }}>Clear</button>
+                </>
+              )}
+              {sigMode === 'type' && (
+                <>
+                  <input value={typedSig} onChange={e => setTypedSig(e.target.value)} placeholder="Type your full name"
+                    style={{ width: '100%', padding: '0.75rem', border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: '0.9rem', outline: 'none', marginBottom: '1rem', boxSizing: 'border-box' }} autoFocus />
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
+                    {fonts.map(f => (
+                      <div key={f} onClick={() => setSigFont(f)}
+                        style={{ border: `1.5px solid ${sigFont === f ? '#2563eb' : '#e2e8f0'}`, borderRadius: 8, padding: '0.75rem', background: sigFont === f ? '#eff6ff' : '#fafafa', cursor: 'pointer', textAlign: 'center', minHeight: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        <span style={{ fontFamily: `'${f}', cursive`, fontSize: '1.4rem', color: '#1e3a5f' }}>{typedSig || 'Preview'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
-          </div>
-        </div>
-      )}
 
-      {/* STEP 3 — Confirm */}
-      {step === 3 && !saving && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1rem' }}>
-          <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e5e7eb', padding: '2rem', width: '100%', maxWidth: 440, boxShadow: '0 4px 24px rgba(0,0,0,0.08)', textAlign: 'center' }}>
-            <div style={{ fontSize: '3rem', marginBottom: '0.75rem' }}>🔐</div>
-            <h2 style={{ fontSize: '1.1rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.5rem' }}>Confirm & Sign</h2>
-            <p style={{ fontSize: '0.85rem', color: '#64748b', marginBottom: '1.5rem', lineHeight: 1.6 }}>
-              By clicking Confirm, you agree this digital signature is legally binding.
-            </p>
-            <div style={{ border: '1.5px solid #e2e8f0', borderRadius: 10, padding: '1rem', marginBottom: '1.25rem', background: '#f8fafc' }}>
-              <img src={sigImage} alt="signature" style={{ maxWidth: 240, maxHeight: 80, objectFit: 'contain' }} />
-            </div>
-            <div style={{ background: '#f8fafc', borderRadius: 8, padding: '0.9rem', marginBottom: '1.5rem', textAlign: 'left', fontSize: '0.8rem', color: '#374151', display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
-              <div>📄 {doc?.original_name}</div>
-              <div>🕐 {new Date().toLocaleString()}</div>
-              <div>✅ Device verified</div>
-            </div>
-            <div style={{ display: 'flex', gap: '0.75rem' }}>
-              <button onClick={() => setStep(2)}
-                style={{ flex: 1, padding: '0.7rem', background: '#f1f5f9', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: '0.875rem' }}>
-                ← Edit
-              </button>
-              <button onClick={handleConfirmSign}
-                style={{ flex: 2, padding: '0.7rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, fontSize: '0.875rem' }}>
-                ✅ Confirm & Sign
+            {error && <div style={{ margin: '0 1.5rem', padding: '0.6rem 0.9rem', background: '#fee2e2', color: '#dc2626', borderRadius: 6, fontSize: '0.8rem' }}>{error}</div>}
+
+            <div style={{ padding: '1rem 1.5rem 1.5rem', display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', borderTop: '1px solid #f1f5f9', marginTop: '0.75rem' }}>
+              <button onClick={() => setShowModal(false)} style={{ padding: '0.7rem 1.25rem', background: '#f1f5f9', color: '#374151', border: 'none', borderRadius: 8, fontWeight: 600, fontSize: '0.9rem', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={handleApply} style={{ padding: '0.7rem 1.5rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: '0.9rem', cursor: 'pointer' }}>
+                Apply Signature →
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {saving && (
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>⏳</div>
-            <div style={{ color: '#64748b', fontWeight: 600 }}>Signing document...</div>
           </div>
         </div>
       )}
@@ -414,5 +255,9 @@ export default function SignDocument() {
 }
 
 const s = {
-  center: { display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', color: '#64748b', fontSize: '1rem' },
+  page:      { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#f1f5f9', flexDirection: 'column', padding: '1rem' },
+  successCard:{ textAlign: 'center', background: 'white', borderRadius: 16, padding: '3rem 2rem', boxShadow: '0 4px 24px rgba(0,0,0,0.08)', maxWidth: 400, width: '100%' },
+  btnPrimary: { padding: '0.75rem 2rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: '0.95rem', cursor: 'pointer' },
+  spinner:   { width: 40, height: 40, border: '3px solid #e5e7eb', borderTopColor: '#2563eb', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto' },
+  spinnerSm: { width: 16, height: 16, border: '2px solid #bfdbfe', borderTopColor: '#2563eb', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 },
 };
