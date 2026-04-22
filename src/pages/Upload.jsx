@@ -34,22 +34,26 @@ export default function Upload() {
     if (!file) return setError('Please select a PDF first.');
     setLoading(true); setError('');
     try {
-      // Upload document
       const form = new FormData();
       form.append('pdf', file);
       const { data } = await api.post('/documents/upload', form, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+        headers: { 'Content-Type': 'multipart/form-data' },
       });
 
       const documentId = data.document.id;
 
-      // Add signers if any
       const validSigners = signers.filter(s => s.trim() !== '');
       if (validSigners.length > 0) {
-        await api.post(`/signers/${documentId}/add`, { signers: validSigners });
+        // Phase 8: add signers WITHOUT dispatching emails yet — sender will
+        // place fields next, then dispatch from the PlaceFields page.
+        await api.post(`/signers/${documentId}/add`, {
+          signers: validSigners,
+          dispatch: false,
+        });
+        navigate(`/place-fields/${documentId}`);
+      } else {
+        navigate('/dashboard');
       }
-
-      navigate('/dashboard');
     } catch (e) {
       setError(e.response?.data?.error || 'Upload failed.');
     } finally {
@@ -62,11 +66,10 @@ export default function Upload() {
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem 1rem' }}>
         <div style={{ background: 'white', borderRadius: 16, border: '1px solid #e5e7eb', padding: 'clamp(1.5rem, 4vw, 2.5rem)', width: '100%', maxWidth: 520, boxShadow: '0 4px 24px rgba(0,0,0,0.06)' }}>
           <h2 style={{ fontSize: '1.2rem', fontWeight: 700, color: '#0f172a', marginBottom: '0.25rem' }}>Upload Document</h2>
-          <p style={{ color: '#64748b', fontSize: '0.85rem', marginBottom: '1.5rem' }}>Upload a PDF and add signers in order</p>
+          <p style={{ color: '#64748b', fontSize: '0.85rem', marginBottom: '1.5rem' }}>Upload a PDF, add signers, then place fields</p>
 
           {error && <div style={{ background: '#fee2e2', color: '#dc2626', padding: '0.7rem', borderRadius: 8, marginBottom: '1rem', fontSize: '0.85rem' }}>{error}</div>}
 
-          {/* Drop zone */}
           <div
             onClick={() => document.getElementById('fileInput').click()}
             onDragOver={e => { e.preventDefault(); setDragging(true); }}
@@ -88,7 +91,6 @@ export default function Upload() {
           </div>
           <input id="fileInput" type="file" accept="application/pdf" onChange={e => handleFile(e.target.files[0])} style={{ display: 'none' }} />
 
-          {/* Signers */}
           <div style={{ marginBottom: '1.25rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem' }}>
               <label style={{ fontSize: '0.85rem', fontWeight: 700, color: '#374151' }}>
@@ -123,11 +125,9 @@ export default function Upload() {
               </div>
             ))}
 
-            {signers.length > 1 && (
-              <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.5rem' }}>
-                ℹ️ Signers will receive email in order — Signer 2 gets email after Signer 1 signs.
-              </p>
-            )}
+            <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '0.5rem' }}>
+              ℹ️ Next step: place signature / text / date fields on the document for each signer.
+            </p>
           </div>
 
           <div style={{ display: 'flex', gap: '0.75rem' }}>
@@ -137,7 +137,7 @@ export default function Upload() {
             </button>
             <button onClick={handleUpload} disabled={!file || loading}
               style={{ flex: 2, padding: '0.7rem', background: !file || loading ? '#93c5fd' : '#2563eb', color: 'white', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: '0.875rem', cursor: !file || loading ? 'not-allowed' : 'pointer' }}>
-              {loading ? 'Uploading...' : '⬆️ Upload PDF'}
+              {loading ? 'Uploading...' : 'Next: Place Fields →'}
             </button>
           </div>
         </div>

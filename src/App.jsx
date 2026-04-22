@@ -7,6 +7,7 @@ import Manage from './pages/Manage';
 import Upload from './pages/Upload';
 import ViewDocument from './pages/ViewDocument';
 import SignDocument from './pages/SignDocument';
+import PlaceFields from './pages/PlaceFields';
 import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
 import VerifyEmail from './pages/VerifyEmail';
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/manage" element={<ProtectedRoute><Manage /></ProtectedRoute>} />
           <Route path="/upload" element={<ProtectedRoute><Upload /></ProtectedRoute>} />
+          <Route path="/place-fields/:id" element={<ProtectedRoute><PlaceFields /></ProtectedRoute>} />
           <Route path="/document/:id" element={<ProtectedRoute><ViewDocument /></ProtectedRoute>} />
           <Route path="/audit" element={<ProtectedRoute><AuditLog /></ProtectedRoute>} />
           <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />

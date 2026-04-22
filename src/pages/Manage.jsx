@@ -9,11 +9,12 @@ export default function Manage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [signersMap, setSignersMap] = useState({});
+  const [downloading, setDownloading] = useState({});
 
   useEffect(() => {
     api.get('/documents').then(({ data }) => {
       setDocuments(data.documents);
-      // Fetch signers for each document
       data.documents.forEach(doc => {
         api.get(`/signers/${doc.id}`).then(({ data: sd }) => {
           setSignersMap(prev => ({ ...prev, [doc.id]: sd.signers }));
@@ -28,6 +29,34 @@ export default function Manage() {
     return mf && ms;
   });
 
+  // Phase 8: download Certificate of Completion
+  const downloadCertificate = async (docId, name) => {
+    setDownloading(prev => ({ ...prev, [docId]: true }));
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`${api.defaults.baseURL}/fields/${docId}/certificate`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Certificate not available.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `certificate-${name || 'document'}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) {
+      alert(e.message || 'Could not download certificate.');
+    } finally {
+      setDownloading(prev => ({ ...prev, [docId]: false }));
+    }
+  };
+
   return (
     <AppShell>
       <div style={{ flex: 1 }}>
@@ -40,7 +69,6 @@ export default function Manage() {
         </header>
 
         <main style={{ padding: 'clamp(1rem, 3vw, 2rem)' }}>
-          {/* Search + filters */}
           <div style={{ display: 'flex', gap: '0.75rem', marginBottom: '1.25rem', flexWrap: 'wrap', alignItems: 'center' }}>
             <div style={{ flex: 1, minWidth: 200, display: 'flex', alignItems: 'center', gap: '0.6rem', background: 'white', border: '1px solid #e2e8f0', borderRadius: 8, padding: '0.5rem 1rem' }}>
               <span style={{ color: '#94a3b8' }}>🔍</span>
@@ -57,7 +85,6 @@ export default function Manage() {
             </div>
           </div>
 
-          {/* Stats row */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem', marginBottom: '1.5rem' }}>
             {[
               { label: 'Total', count: documents.length, color: '#0f172a' },
@@ -71,7 +98,6 @@ export default function Manage() {
             ))}
           </div>
 
-          {/* Documents grid/list */}
           {loading ? (
             <div style={{ textAlign: 'center', padding: '3rem', color: '#94a3b8' }}>Loading...</div>
           ) : filtered.length === 0 ? (
@@ -94,17 +120,30 @@ export default function Manage() {
                       </div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.4rem' }}>
                     <span style={{ display: 'inline-block', padding: '0.25rem 0.65rem', borderRadius: 20, fontSize: '0.72rem', fontWeight: 600,
                       background: doc.status === 'signed' ? '#dcfce7' : '#fef9c3',
                       color: doc.status === 'signed' ? '#16a34a' : '#ca8a04' }}>
                       {doc.status === 'signed' ? '✓ Signed' : '⏳ Pending'}
                     </span>
-                    <div style={{ display: 'flex', gap: '0.4rem' }}>
+                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                       <button onClick={() => navigate(`/document/${doc.id}`)}
                         style={{ padding: '0.3rem 0.75rem', background: 'white', border: '1px solid #bfdbfe', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', color: '#2563eb', fontWeight: 600 }}>
                         View
                       </button>
+                      {doc.status === 'signed' && (
+                        <button onClick={() => downloadCertificate(doc.id, doc.original_name)}
+                                disabled={!!downloading[doc.id]}
+                          style={{ padding: '0.3rem 0.75rem', background: '#16a34a', color: 'white', border: 'none', borderRadius: 6, cursor: downloading[doc.id] ? 'wait' : 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+                          {downloading[doc.id] ? '…' : '📜 Certificate'}
+                        </button>
+                      )}
+                      {doc.status !== 'signed' && (
+                        <button onClick={() => navigate(`/place-fields/${doc.id}`)}
+                          style={{ padding: '0.3rem 0.75rem', background: '#f59e0b', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+                          Fields
+                        </button>
+                      )}
                       {doc.status !== 'signed' && (
                         <button onClick={() => navigate(`/sign/${doc.id}`)}
                           style={{ padding: '0.3rem 0.75rem', background: '#2563eb', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
@@ -114,20 +153,27 @@ export default function Manage() {
                       {doc.status !== 'signed' && (
                         <button onClick={async () => {
                           try {
-                            const { data } = await import('../services/api').then(m => m.default.get(`/signers/${doc.id}`));
-                            const pendingSigner = data.signers?.find(s => s.status === 'pending');
-                            const email = pendingSigner?.email || '';
-                            const link = `${window.location.origin}/sign/${doc.id}${email ? '?signer=' + encodeURIComponent(email) : ''}`;
-                            navigator.clipboard.writeText(link);
-                            alert(`Signing link copied!\nFor: ${email || 'anyone'}`);
-                          } catch {
-                            const link = `${window.location.origin}/sign/${doc.id}`;
-                            navigator.clipboard.writeText(link);
-                            alert('Signing link copied!');
+                            const { data: info } = await api.get(`/signers/${doc.id}`);
+                            const pending = info.signers?.find(s => s.status === 'pending');
+                            if (!pending?.email) {
+                              alert('No pending signer available to generate a link for.');
+                              return;
+                            }
+                            const { data } = await api.post(
+                              `/signers/${doc.id}/regenerate-link`,
+                              { email: pending.email }
+                            );
+                            await navigator.clipboard.writeText(data.link);
+                            alert(
+                              `Signing link copied for ${pending.email}.\n` +
+                              `Any previous link for this signer is no longer valid.`
+                            );
+                          } catch (err) {
+                            alert(err?.response?.data?.error || 'Could not generate link.');
                           }
                         }}
-                          style={{ padding: '0.3rem 0.75rem', background: '#f59e0b', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
-                          📋 Copy Link
+                          style={{ padding: '0.3rem 0.75rem', background: '#64748b', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600 }}>
+                          📋 Link
                         </button>
                       )}
                     </div>
