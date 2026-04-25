@@ -440,7 +440,7 @@ export default function SignDocument() {
           A copy will be emailed to all parties once everyone has signed.
         </p>
 
-        <button onClick={() => navigate(effectiveToken ? '/login' : '/dashboard')} style={s.btnPrimary}>
+        <button onClick={() => effectiveToken ? window.close() : navigate('/dashboard')} style={s.btnPrimary}>
           {effectiveToken ? 'Close' : 'Go to Dashboard'}
         </button>
       </div>
