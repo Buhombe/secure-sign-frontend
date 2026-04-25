@@ -128,7 +128,7 @@ export default function SignDocument() {
         } catch { /* ignore */ }
 
         const url = effectiveToken
-          ? `${API_BASE}/documents/${id}/serve/public?token=${encodeURIComponent(effectiveToken)}`
+          ? `${API_BASE}/documents/${id}/serve/signer?token=${encodeURIComponent(effectiveToken)}`
           : `${API_BASE}/documents/${id}/stream`;
         const headers = {};
         if (token && !effectiveToken) headers.Authorization = `Bearer ${token}`;
