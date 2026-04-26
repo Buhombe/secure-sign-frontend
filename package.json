@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "otplib": "^13.4.0",
+    "qrcode": "^1.5.4"
+  }
+}
