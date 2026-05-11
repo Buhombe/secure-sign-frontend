@@ -116,7 +116,7 @@ async function enqueueCertificate(documentId) {
  * enqueueSigningInvite — send signing invite email to a specific signer.
  */
 async function enqueueSigningInvite({ documentId, recipientEmail, documentName, signingLink }) {
-  const dedupeKey = `email:invite:${documentId}:${recipientEmail}`;
+  const dedupeKey = `email-invite-${documentId}-${recipientEmail}`;
   return emailQueue.add(
     'send-signing-invite',
     { documentId, recipientEmail, documentName, signingLink },
