@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HakikiSign — E-Signature Platform for Africa</title>
+    <meta name="description" content="HakikiSign — Secure, legally-binding e-signatures for businesses across Africa." />
+    <meta name="theme-color" content="#1a56b0" />
+
+    <!-- PWA manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- Favicon: inline SVG as data URI -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icon-192.svg" />
+
+    <!-- Splash background while JS loads -->
+    <style>
+      html, body { margin: 0; padding: 0; background: #0f2461; }
+      #root { background: #f8fafc; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

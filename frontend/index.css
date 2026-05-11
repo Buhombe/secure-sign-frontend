@@ -1,0 +1,42 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f8fafc;
+  color: #0f172a;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+
+#root { min-height: 100vh; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+/* Prevent horizontal scroll on mobile */
+html, body { overflow-x: hidden; max-width: 100vw; }
+
+/* Mobile safe area (notch support) */
+@supports (padding: max(0px)) {
+  .mobile-topbar { padding-left: max(1rem, env(safe-area-inset-left)); padding-right: max(1rem, env(safe-area-inset-right)); }
+}
+
+/* Tap highlight */
+button, a { -webkit-tap-highlight-color: transparent; }
+
+/* Make inputs feel native on mobile */
+input, textarea, select {
+  font-family: inherit;
+  font-size: 16px; /* prevents zoom on iOS */
+}
+
+/* Responsive utilities */
+@media (max-width: 768px) {
+  .hide-mobile { display: none !important; }
+}
+@media (min-width: 769px) {
+  .hide-desktop { display: none !important; }
+}
