@@ -9,7 +9,11 @@ import AppShell from '../components/AppShell';
 /* ─── Status Badge ───────────────────────────────────────────── */
 function StatusBadge({ status }) {
   const st = getStatusStyle(status);
-  const dots = { completed:'#16A34A', signed:'#16A34A', pending:'#D97706', in_progress:'#2563EB', voided:'#DC2626', expired:'#9333EA', draft:'#64748B' };
+  const dots = {
+    completed: '#16A34A', signed: '#16A34A', pending: '#D97706',
+    in_progress: '#2563EB', voided: '#DC2626', expired: '#9333EA',
+    draft: '#64748B', declined: '#B45309',
+  };
   const dot = dots[status] || '#64748B';
   return (
     <span style={{
@@ -54,12 +58,12 @@ function StatCard({ num, label, sub, icon, iconBg, iconColor }) {
 /* ─── Actions Menu ───────────────────────────────────────────── */
 function ActionsMenu({ doc, navigate }) {
   const [open, setOpen] = useState(false);
-  const isDone   = ['completed','signed'].includes(doc.status);
-  const isVoided = doc.status === 'voided';
+  const isDone     = ['completed','signed'].includes(doc.status);
+  const isTerminal = ['voided','declined'].includes(doc.status);
   const items = [
     { label: 'View', icon: '👁', action: () => navigate(`/document/${doc.id}`) },
-    ...(!isDone && !isVoided ? [{ label: 'Sign', icon: '✍️', action: () => navigate(`/sign/${doc.id}`) }] : []),
-    ...(!isDone && !isVoided ? [{ label: 'Place Fields', icon: '📋', action: () => navigate(`/place-fields/${doc.id}`) }] : []),
+    ...(!isDone && !isTerminal ? [{ label: 'Sign', icon: '✍️', action: () => navigate(`/sign/${doc.id}`) }] : []),
+    ...(!isDone && !isTerminal ? [{ label: 'Place Fields', icon: '📋', action: () => navigate(`/place-fields/${doc.id}`) }] : []),
     { label: 'Audit Trail', icon: '📊', action: () => navigate(`/audit?doc=${doc.id}`) },
   ];
 
@@ -160,13 +164,17 @@ export default function Dashboard() {
   const pending    = documents.filter(d => ['pending','draft'].includes(d.status)).length;
   const inProgress = documents.filter(d => d.status === 'in_progress').length;
   const completed  = documents.filter(d => ['completed','signed'].includes(d.status)).length;
+  const declined   = documents.filter(d => d.status === 'declined').length;
 
   const filtered = documents
     .filter(d => {
       const name = d.original_name || d.display_title || '';
-      const matchFilter = filter === 'all' || d.status === filter ||
+      const matchFilter =
+        filter === 'all' ||
+        d.status === filter ||
         (filter === 'signed'   && ['signed','completed'].includes(d.status)) ||
-        (filter === 'pending'  && ['pending','draft'].includes(d.status));
+        (filter === 'pending'  && ['pending','draft'].includes(d.status)) ||
+        (filter === 'declined' && d.status === 'declined');
       const matchSearch = name.toLowerCase().includes(search.toLowerCase());
       return matchFilter && matchSearch;
     })
@@ -177,6 +185,7 @@ export default function Dashboard() {
     { key: 'pending',     label: 'Pending' },
     { key: 'in_progress', label: 'In Progress' },
     { key: 'signed',      label: 'Completed' },
+    { key: 'declined',    label: 'Declined' },
     { key: 'voided',      label: 'Voided' },
   ];
 
@@ -213,6 +222,11 @@ export default function Dashboard() {
               num={completed} label="Completed" sub="Fully signed"
               iconBg="#DCFCE7" iconColor="#16A34A"
               icon={<svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>}
+            />
+            <StatCard
+              num={declined} label="Declined" sub="Signer refused"
+              iconBg="#FFF7ED" iconColor="#B45309"
+              icon={<svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path strokeLinecap="round" strokeLinejoin="round" d="M15 9l-6 6m0-6l6 6"/></svg>}
             />
             <StatCard
               num={documents.length} label="Total" sub="All documents"

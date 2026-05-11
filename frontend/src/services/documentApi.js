@@ -37,6 +37,7 @@ export const STATUS = {
   signed:      { label: 'Signed',      color: '#16a34a', bg: '#dcfce7' },
   voided:      { label: 'Voided',      color: '#dc2626', bg: '#fee2e2' },
   expired:     { label: 'Expired',     color: '#9333ea', bg: '#f3e8ff' },
+  declined:    { label: 'Declined',    color: '#b45309', bg: '#fff7ed' },
 };
 
 export const getStatusStyle = (status) =>

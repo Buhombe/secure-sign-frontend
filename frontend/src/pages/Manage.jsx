@@ -23,8 +23,8 @@ function StatusBadge({ status }) {
 
 /* ─── Document Card (Mobile) ─────────────────────────────────── */
 function DocCard({ doc, onView, onSign, onFields, onCertificate, onLink, downloading }) {
-  const isDone   = ['completed','signed'].includes(doc.status);
-  const isVoided = doc.status === 'voided';
+  const isDone     = ['completed','signed'].includes(doc.status);
+  const isTerminal = ['voided','declined'].includes(doc.status);
   return (
     <div style={{
       background: 'white', borderRadius: 14, border: '1px solid #E2E8F0',
@@ -49,10 +49,10 @@ function DocCard({ doc, onView, onSign, onFields, onCertificate, onLink, downloa
       </div>
       <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', paddingTop: '0.25rem', borderTop: '1px solid #F1F5F9' }}>
         <button onClick={onView} style={btnStyle('#2563EB', 'ghost')}>View</button>
-        {!isDone && !isVoided && <button onClick={onSign} style={btnStyle('#2563EB', 'solid')}>Sign</button>}
-        {!isDone && !isVoided && <button onClick={onFields} style={btnStyle('#D97706', 'solid')}>Fields</button>}
+        {!isDone && !isTerminal && <button onClick={onSign} style={btnStyle('#2563EB', 'solid')}>Sign</button>}
+        {!isDone && !isTerminal && <button onClick={onFields} style={btnStyle('#D97706', 'solid')}>Fields</button>}
         {isDone && <button onClick={onCertificate} disabled={downloading} style={btnStyle('#16A34A', 'solid')}>{downloading ? '…' : 'Certificate'}</button>}
-        {!isDone && !isVoided && <button onClick={onLink} style={btnStyle('#64748B', 'ghost')}>📋 Link</button>}
+        {!isDone && !isTerminal && <button onClick={onLink} style={btnStyle('#64748B', 'ghost')}>📋 Link</button>}
       </div>
     </div>
   );
@@ -65,8 +65,8 @@ function btnStyle(color, variant) {
 
 /* ─── Desktop Table Row ──────────────────────────────────────── */
 function TableRow({ doc, idx, onView, onSign, onFields, onCertificate, onLink, downloading, signers }) {
-  const isDone   = ['completed','signed'].includes(doc.status);
-  const isVoided = doc.status === 'voided';
+  const isDone     = ['completed','signed'].includes(doc.status);
+  const isTerminal = ['voided','declined'].includes(doc.status);
   const signerCount = signers?.length || 0;
   return (
     <div style={{
@@ -105,10 +105,10 @@ function TableRow({ doc, idx, onView, onSign, onFields, onCertificate, onLink, d
       {/* Actions */}
       <div style={{ flex: 2, display: 'flex', justifyContent: 'flex-end', gap: '0.4rem', flexWrap: 'wrap' }}>
         <button onClick={onView} style={btnStyle('#2563EB', 'ghost')}>View</button>
-        {!isDone && !isVoided && <button onClick={onSign} style={btnStyle('#2563EB', 'solid')}>Sign</button>}
-        {!isDone && !isVoided && <button onClick={onFields} style={btnStyle('#D97706', 'solid')}>Fields</button>}
+        {!isDone && !isTerminal && <button onClick={onSign} style={btnStyle('#2563EB', 'solid')}>Sign</button>}
+        {!isDone && !isTerminal && <button onClick={onFields} style={btnStyle('#D97706', 'solid')}>Fields</button>}
         {isDone && <button onClick={onCertificate} disabled={downloading} style={btnStyle('#16A34A', 'solid')}>{downloading ? '…' : '📜 Cert'}</button>}
-        {!isDone && !isVoided && (
+        {!isDone && !isTerminal && (
           <button onClick={onLink}
             style={{ padding: '0.3rem 0.55rem', background: 'white', border: '1px solid #E2E8F0', borderRadius: 7, cursor: 'pointer', fontSize: '0.78rem', fontWeight: 600, color: '#64748B' }}>
             📋
@@ -143,8 +143,12 @@ export default function Manage() {
   }, []);
 
   const filtered = documents.filter(d => {
-    const matchFilter = filter === 'all' || d.status === filter ||
-      (filter === 'signed' && ['signed','completed'].includes(d.status));
+    const matchFilter =
+      filter === 'all' ||
+      d.status === filter ||
+      (filter === 'signed'    && ['signed','completed'].includes(d.status)) ||
+      (filter === 'pending'   && ['pending','draft'].includes(d.status)) ||
+      (filter === 'declined'  && d.status === 'declined');
     const matchSearch = (d.original_name || '').toLowerCase().includes(search.toLowerCase());
     return matchFilter && matchSearch;
   });
@@ -179,11 +183,12 @@ export default function Manage() {
   };
 
   const FILTERS = [
-    { key: 'all', label: 'All', count: documents.length },
-    { key: 'pending', label: 'Pending', count: documents.filter(d => ['pending','draft'].includes(d.status)).length },
+    { key: 'all',         label: 'All',         count: documents.length },
+    { key: 'pending',     label: 'Pending',     count: documents.filter(d => ['pending','draft'].includes(d.status)).length },
     { key: 'in_progress', label: 'In Progress', count: documents.filter(d => d.status === 'in_progress').length },
-    { key: 'signed', label: 'Completed', count: documents.filter(d => ['signed','completed'].includes(d.status)).length },
-    { key: 'voided', label: 'Voided', count: documents.filter(d => d.status === 'voided').length },
+    { key: 'signed',      label: 'Completed',   count: documents.filter(d => ['signed','completed'].includes(d.status)).length },
+    { key: 'declined',    label: 'Declined',    count: documents.filter(d => d.status === 'declined').length },
+    { key: 'voided',      label: 'Voided',      count: documents.filter(d => d.status === 'voided').length },
   ];
 
   return (
