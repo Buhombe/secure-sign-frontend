@@ -27,46 +27,46 @@
  */
 
 const crypto = require('crypto');
-const pool   = require('../config/database');
+const pool = require('../config/database');
 
 // ── Action constants ──────────────────────────────────────────────────────────
 const ACTIONS = Object.freeze({
   // Auth
-  SIGNUP:                   'SIGNUP',
-  LOGIN:                    'LOGIN',
-  LOGIN_FAILED:             'LOGIN_FAILED',
-  LOGOUT:                   'LOGOUT',
-  LOGOUT_ALL:               'LOGOUT_ALL',
-  ACCOUNT_LOCKED:           'ACCOUNT_LOCKED',
-  TOKEN_REFRESH:            'TOKEN_REFRESH',
+  SIGNUP: 'SIGNUP',
+  LOGIN: 'LOGIN',
+  LOGIN_FAILED: 'LOGIN_FAILED',
+  LOGOUT: 'LOGOUT',
+  LOGOUT_ALL: 'LOGOUT_ALL',
+  ACCOUNT_LOCKED: 'ACCOUNT_LOCKED',
+  TOKEN_REFRESH: 'TOKEN_REFRESH',
   // Email verification (Phase 2)
-  EMAIL_VERIFICATION_SENT:  'EMAIL_VERIFICATION_SENT',
-  EMAIL_VERIFIED:           'EMAIL_VERIFIED',
-  EMAIL_VERIFY_FAILED:      'EMAIL_VERIFY_FAILED',
-  EMAIL_RESENT:             'EMAIL_RESENT',
+  EMAIL_VERIFICATION_SENT: 'EMAIL_VERIFICATION_SENT',
+  EMAIL_VERIFIED: 'EMAIL_VERIFIED',
+  EMAIL_VERIFY_FAILED: 'EMAIL_VERIFY_FAILED',
+  EMAIL_RESENT: 'EMAIL_RESENT',
   // Password reset (Phase 2)
   PASSWORD_RESET_REQUESTED: 'PASSWORD_RESET_REQUESTED',
-  PASSWORD_RESET_COMPLETE:  'PASSWORD_RESET_COMPLETE',
-  PASSWORD_RESET_FAILED:    'PASSWORD_RESET_FAILED',
+  PASSWORD_RESET_COMPLETE: 'PASSWORD_RESET_COMPLETE',
+  PASSWORD_RESET_FAILED: 'PASSWORD_RESET_FAILED',
   // MFA
-  MFA_ENABLED:              'MFA_ENABLED',
-  MFA_DISABLED:             'MFA_DISABLED',
-  MFA_AUTH:                 'MFA_AUTH',
-  MFA_FAILED:               'MFA_FAILED',
+  MFA_ENABLED: 'MFA_ENABLED',
+  MFA_DISABLED: 'MFA_DISABLED',
+  MFA_AUTH: 'MFA_AUTH',
+  MFA_FAILED: 'MFA_FAILED',
   // Documents
-  UPLOAD:                   'UPLOAD',
-  VIEW:                     'VIEW',
-  DOWNLOAD:                 'DOWNLOAD',
-  DOWNLOAD_PUBLIC:          'DOWNLOAD_PUBLIC',
-  SIGN:                     'SIGN',
-  DECLINE:                  "DECLINE",
-  REVOKE:                   "REVOKE",
+  UPLOAD: 'UPLOAD',
+  VIEW: 'VIEW',
+  DOWNLOAD: 'DOWNLOAD',
+  DOWNLOAD_PUBLIC: 'DOWNLOAD_PUBLIC',
+  SIGN: 'SIGN',
+  DECLINE: "DECLINE",
+  REVOKE: "REVOKE",
   // Verification
-  VERIFY:                   'VERIFY',
-  VERIFY_FAILED:            'VERIFY_FAILED',
-  TAMPER_DETECTED:          'TAMPER_DETECTED',
+  VERIFY: 'VERIFY',
+  VERIFY_FAILED: 'VERIFY_FAILED',
+  TAMPER_DETECTED: 'TAMPER_DETECTED',
   // Admin
-  INTEGRITY_CHECK:          'INTEGRITY_CHECK',
+  INTEGRITY_CHECK: 'INTEGRITY_CHECK',
 });
 
 // ── HMAC key ──────────────────────────────────────────────────────────────────
@@ -107,20 +107,20 @@ function computeRowHmac({ user_id, document_id, action, ip_address, timestamp })
  * @param {object|null} entry.metadata     — arbitrary JSON (stored in metadata col)
  */
 async function log({
-  userId      = null,
-  documentId  = null,
+  userId = null,
+  documentId = null,
   action,
-  ipAddress   = null,
-  deviceInfo  = null,
-  metadata    = null,
+  ipAddress = null,
+  deviceInfo = null,
+  metadata = null,
 }) {
   try {
     const timestamp = new Date().toISOString();
-    const rowHmac   = computeRowHmac({
-      user_id:     userId,
+    const rowHmac = computeRowHmac({
+      user_id: userId,
       document_id: documentId,
       action,
-      ip_address:  ipAddress,
+      ip_address: ipAddress,
       timestamp,
     });
 
@@ -178,16 +178,16 @@ async function verifyIntegrity({ limit = 1000, offset = 0 } = {}) {
     } else {
       invalid++;
       details.push({
-        id:        row.id,
-        action:    row.action,
+        id: row.id,
+        action: row.action,
         timestamp: row.timestamp,
-        issue:     'HMAC mismatch — row may have been modified',
+        issue: 'HMAC mismatch — row may have been modified',
       });
     }
   }
 
   return {
-    total:   result.rows.length,
+    total: result.rows.length,
     valid,
     invalid,
     missing,
@@ -206,7 +206,7 @@ async function getUserLogs({ userId, action = null, limit = 50, offset = 0 }) {
     where += ` AND al.action = $${params.length}`;
   }
   params.push(limit, offset);
-  const limitPos  = params.length - 1;
+  const limitPos = params.length - 1;
   const offsetPos = params.length;
 
   const result = await pool.query(
