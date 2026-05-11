@@ -1,15 +1,43 @@
 // /frontend/src/services/documentApi.js
-// New API functions for workflow features — uses existing api.js axios instance
+//
+// HakikiSign document API service layer.
+// Updated to support the new cursor-paginated GET /documents endpoint
+// and the new GET /documents/stats endpoint.
+// All existing functions are preserved unchanged.
 
 import api from './api';
 
-// ── Documents ──────────────────────────────────────────────────
+// ── Paginated document list ────────────────────────────────────────────────────
+// Replaces the simple `api.get('/documents')` call. Now accepts pagination
+// parameters and returns the full server response including cursor metadata.
+//
+// params:
+//   cursor   — opaque continuation token (omit for first page)
+//   limit    — items per page (1–100, default 25)
+//   status   — status filter ('all' | 'pending' | 'in_progress' | 'signed' | etc.)
+//   search   — search string
+//   sort     — 'created_at' | 'signed_at'
+//   dir      — 'asc' | 'desc'
+//
+// Returns:
+//   { documents, total, nextCursor, hasMore, pageSize, meta }
 export const getDocuments = (params = {}) =>
   api.get('/documents', { params }).then(r => r.data);
 
+// ── Dashboard stats (aggregated counts) ───────────────────────────────────────
+// New endpoint: returns per-status counts without fetching any document rows.
+// More efficient than computing counts from the full document list.
+//
+// Returns:
+//   { stats: { pending, in_progress, completed, declined, voided, expired, total } }
+export const getDocumentStats = () =>
+  api.get('/documents/stats').then(r => r.data);
+
+// ── Single document ────────────────────────────────────────────────────────────
 export const getDocument = (id) =>
   api.get(`/documents/${id}`).then(r => r.data);
 
+// ── Document actions (UNCHANGED) ───────────────────────────────────────────────
 export const sendDocument = (id) =>
   api.post(`/documents/${id}/send`).then(r => r.data);
 
@@ -28,7 +56,7 @@ export const downloadAuditPdf = (id) =>
 export const downloadDocument = (id) =>
   api.get(`/documents/${id}/download`).then(r => r.data);
 
-// ── Status helpers ─────────────────────────────────────────────
+// ── Status helpers (UNCHANGED) ─────────────────────────────────────────────────
 export const STATUS = {
   draft:       { label: 'Draft',       color: '#64748b', bg: '#f1f5f9' },
   pending:     { label: 'Pending',     color: '#d97706', bg: '#fef9c3' },
