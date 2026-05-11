@@ -288,6 +288,45 @@ export default function SignDocument() {
     }
   };
 
+  // ── 5b. Decline ───────────────────────────────────────────────────────────
+  const handleDecline = async (reason) => {
+    const headers = { 'Content-Type': 'application/json' };
+
+    // Attach auth — token-link signers use the public endpoint; JWT users use
+    // the authenticated endpoint. Both paths are already implemented in the backend.
+    if (effectiveToken) {
+      // Public (email-link) signer path
+      const response = await fetch(
+        `${API_BASE}/signers/${id}/decline-public`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ token: effectiveToken, reason }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not process your decline.');
+    } else {
+      // JWT-authenticated path (registered user signing their own document chain)
+      const jwtToken = await getToken();
+      if (jwtToken) headers['Authorization'] = `Bearer ${jwtToken}`;
+      const response = await fetch(
+        `${API_BASE}/signers/${id}/decline`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ reason }),
+        }
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || 'Could not process your decline.');
+    }
+
+    // Success — show the decline-confirmed screen
+    setShowDeclineModal(false);
+    setDeclined(true);
+  };
+
   const handleFieldClick = (field) => {
     setActiveFieldIdx(fields.findIndex(f => f.id === field.id));
     switch (field.field_type) {
