@@ -615,6 +615,7 @@ export default function SignDocument() {
               <span>Click any highlighted field to fill it</span>
             )}
           </div>
+          <button onClick={() => setShowDeclineModal(true)} style={{ padding: "0.3rem 0.85rem", background: "rgba(220,38,38,0.15)", color: "#fca5a5", border: "1px solid rgba(220,38,38,0.3)", borderRadius: 6, fontSize: "0.78rem", fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}>✕ Decline</button>
           {!allRequiredFilled && (
             <button onClick={goToNextField}
               style={{ padding: '0.3rem 0.85rem', background: 'rgba(255,255,255,0.15)', color: 'white', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 6, fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}>
