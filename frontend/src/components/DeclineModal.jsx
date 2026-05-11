@@ -230,7 +230,7 @@ export default function DeclineModal({
                   ref={textAreaRef}
                   value={reason}
                   onChange={handleTextChange}
-                  placeholder="Or describe your reason here (required)…"
+                  id="decline-reason" name="decline-reason" placeholder="Or describe your reason here (required)…"
                   rows={4}
                   style={{
                     width: '100%', padding: '0.75rem',
