@@ -1,10 +1,20 @@
-// Manage.jsx — Documents management page (modernized)
+// Manage.jsx — Documents management page (pagination-hardened)
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import { getStatusStyle } from '../services/documentApi';
+import { useDocumentPagination } from '../hooks/useDocumentPagination';
 import AppShell from '../components/AppShell';
+
+function useDebounced(value, delay = 350) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+  return debounced;
+}
 
 /* ─── Status Badge ───────────────────────────────────────────── */
 function StatusBadge({ status }) {
@@ -123,35 +133,44 @@ function TableRow({ doc, idx, onView, onSign, onFields, onCertificate, onLink, d
 export default function Manage() {
   const { getToken } = useAuth();
   const navigate = useNavigate();
-  const [documents,  setDocuments]  = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [filter,     setFilter]     = useState('all');
-  const [search,     setSearch]     = useState('');
-  const [signersMap, setSignersMap] = useState({});
+  const [filter,      setFilter]     = useState('all');
+  const [searchRaw,   setSearchRaw]  = useState('');
+  const search = useDebounced(searchRaw, 350);
+  const [signersMap,  setSignersMap] = useState({});
   const [downloading, setDownloading] = useState({});
 
+  const {
+    documents,
+    total,
+    hasMore,
+    loadedCount,
+    loading,
+    loadingMore,
+    error,
+    loadMore,
+    retry,
+  } = useDocumentPagination({
+    status: filter,
+    search,
+    sort:   'created_at',
+    dir:    'desc',
+    limit:  25,
+  });
+
+  // Fetch signers for each newly loaded document
   useEffect(() => {
-    api.get('/documents').then(({ data }) => {
-      const docs = data.documents || data;
-      setDocuments(docs);
-      docs.forEach(doc => {
+    documents.forEach(doc => {
+      if (!signersMap[doc.id]) {
         api.get(`/signers/${doc.id}`).then(({ data: sd }) => {
           setSignersMap(prev => ({ ...prev, [doc.id]: sd.signers }));
         }).catch(() => {});
-      });
-    }).catch(console.error).finally(() => setLoading(false));
-  }, []);
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents]);
 
-  const filtered = documents.filter(d => {
-    const matchFilter =
-      filter === 'all' ||
-      d.status === filter ||
-      (filter === 'signed'    && ['signed','completed'].includes(d.status)) ||
-      (filter === 'pending'   && ['pending','draft'].includes(d.status)) ||
-      (filter === 'declined'  && d.status === 'declined');
-    const matchSearch = (d.original_name || '').toLowerCase().includes(search.toLowerCase());
-    return matchFilter && matchSearch;
-  });
+  // documents from hook are already filtered server-side
+  const filtered = documents;
 
   const downloadCertificate = async (docId, name) => {
     setDownloading(prev => ({ ...prev, [docId]: true }));
@@ -183,12 +202,12 @@ export default function Manage() {
   };
 
   const FILTERS = [
-    { key: 'all',         label: 'All',         count: documents.length },
-    { key: 'pending',     label: 'Pending',     count: documents.filter(d => ['pending','draft'].includes(d.status)).length },
-    { key: 'in_progress', label: 'In Progress', count: documents.filter(d => d.status === 'in_progress').length },
-    { key: 'signed',      label: 'Completed',   count: documents.filter(d => ['signed','completed'].includes(d.status)).length },
-    { key: 'declined',    label: 'Declined',    count: documents.filter(d => d.status === 'declined').length },
-    { key: 'voided',      label: 'Voided',      count: documents.filter(d => d.status === 'voided').length },
+    { key: 'all',         label: 'All',         count: total },
+    { key: 'pending',     label: 'Pending',     count: null },
+    { key: 'in_progress', label: 'In Progress', count: null },
+    { key: 'signed',      label: 'Completed',   count: null },
+    { key: 'declined',    label: 'Declined',    count: null },
+    { key: 'voided',      label: 'Voided',      count: null },
   ];
 
   return (
@@ -199,7 +218,10 @@ export default function Manage() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '1.25rem' }}>
             <div>
               <h1 style={{ fontSize: 'clamp(1.1rem,3vw,1.4rem)', fontWeight: 800, color: '#0F172A', letterSpacing: '-0.02em' }}>Documents</h1>
-              <p style={{ fontSize: '0.875rem', color: '#64748B', marginTop: 2 }}>{documents.length} total document{documents.length !== 1 ? 's' : ''}</p>
+              <p style={{ fontSize: '0.875rem', color: '#64748B', marginTop: 2 }}>
+                {loading ? 'Loading…' : `${total.toLocaleString()} total document${total !== 1 ? 's' : ''}`}
+                {!loading && loadedCount < total && ` · ${loadedCount} loaded`}
+              </p>
             </div>
             <button onClick={() => navigate('/upload')}
               style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.55rem 1.1rem', background: '#2563EB', color: 'white', border: 'none', borderRadius: 10, fontWeight: 700, fontSize: '0.875rem', cursor: 'pointer', boxShadow: '0 2px 8px rgba(37,99,235,0.28)' }}
@@ -215,11 +237,11 @@ export default function Manage() {
           <div style={{ background: 'white', borderRadius: 14, border: '1px solid #E2E8F0', padding: '0.85rem 1.1rem', marginBottom: '1.25rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 9, padding: '0.4rem 0.85rem', flex: 1, minWidth: 180 }}>
               <svg width="14" height="14" fill="none" viewBox="0 0 24 24" stroke="#94A3B8" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35" strokeLinecap="round"/></svg>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search by name..."
+              <input value={searchRaw} onChange={e => setSearchRaw(e.target.value)} placeholder="Search by name..."
                 style={{ background: 'transparent', border: 'none', outline: 'none', fontSize: '0.875rem', color: '#0F172A', width: '100%' }}
               />
               {search && (
-                <button onClick={() => setSearch('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', fontSize: '1rem', lineHeight: 1 }}>×</button>
+                <button onClick={() => setSearchRaw('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', fontSize: '1rem', lineHeight: 1 }}>×</button>
               )}
             </div>
             <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
@@ -255,9 +277,9 @@ export default function Manage() {
               <div style={{ width: 56, height: 56, borderRadius: '50%', background: '#F1F5F9', margin: '0 auto 1rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <svg width="24" height="24" fill="none" viewBox="0 0 24 24" stroke="#94A3B8" strokeWidth="1.5"><path strokeLinecap="round" strokeLinejoin="round" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h4a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
               </div>
-              <div style={{ fontWeight: 600, color: '#374151', marginBottom: '0.35rem' }}>{search ? 'No results' : 'No documents'}</div>
-              <div style={{ fontSize: '0.84rem', color: '#94A3B8', marginBottom: '1.25rem' }}>{search ? 'Try adjusting your search.' : 'Upload your first document to get started.'}</div>
-              {!search && (
+              <div style={{ fontWeight: 600, color: '#374151', marginBottom: '0.35rem' }}>{searchRaw ? 'No results' : 'No documents'}</div>
+              <div style={{ fontSize: '0.84rem', color: '#94A3B8', marginBottom: '1.25rem' }}>{searchRaw ? 'Try adjusting your search.' : 'Upload your first document to get started.'}</div>
+              {!searchRaw && (
                 <button onClick={() => navigate('/upload')}
                   style={{ padding: '0.55rem 1.2rem', background: '#2563EB', color: 'white', border: 'none', borderRadius: 9, fontWeight: 600, fontSize: '0.875rem', cursor: 'pointer' }}>
                   Upload Document
@@ -308,8 +330,47 @@ export default function Manage() {
                   .hs-desktop-table { display: block !important; }
                   .hs-mobile-cards  { display: none !important; }
                 }
+                .pulse { animation: pulse 1.5s ease-in-out infinite; }
+                @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.45 } }
               `}</style>
             </>
+          )}
+
+          {/* ── Error state ─────────────────────────────────────── */}
+          {!loading && error && (
+            <div style={{ background: 'white', borderRadius: 14, border: '1px solid #FECACA', padding: '2rem', textAlign: 'center', marginTop: '0.75rem' }}>
+              <div style={{ fontWeight: 600, color: '#DC2626', marginBottom: '0.5rem' }}>
+                {error.type === 'auth' ? 'Session expired' : 'Failed to load documents'}
+              </div>
+              <div style={{ fontSize: '0.84rem', color: '#94A3B8', marginBottom: '1rem' }}>{error.message}</div>
+              {error.retryable && (
+                <button onClick={retry} style={{ padding: '0.5rem 1.2rem', background: '#2563EB', color: 'white', border: 'none', borderRadius: 9, fontWeight: 600, fontSize: '0.85rem', cursor: 'pointer' }}>
+                  Try again
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* ── Load More + progress ────────────────────────────── */}
+          {!loading && !error && documents.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem', padding: '1rem 0', marginTop: '0.5rem' }}>
+              <span style={{ fontSize: '0.78rem', color: '#94A3B8' }}>
+                {loadedCount < total
+                  ? `${loadedCount.toLocaleString()} of ${total.toLocaleString()} loaded`
+                  : `All ${total.toLocaleString()} document${total !== 1 ? 's' : ''} loaded`}
+              </span>
+              {total > 0 && (
+                <div style={{ flex: 1, minWidth: 80, maxWidth: 200, height: 4, background: '#E2E8F0', borderRadius: 4, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', background: '#2563EB', borderRadius: 4, width: `${Math.min((loadedCount / total) * 100, 100)}%`, transition: 'width 0.3s ease' }} />
+                </div>
+              )}
+              {hasMore && (
+                <button onClick={loadMore} disabled={loadingMore}
+                  style={{ padding: '0.45rem 1.1rem', background: loadingMore ? '#F1F5F9' : 'white', border: '1px solid #E2E8F0', borderRadius: 9, fontWeight: 600, fontSize: '0.82rem', color: loadingMore ? '#94A3B8' : '#2563EB', cursor: loadingMore ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                  {loadingMore ? 'Loading…' : 'Load more ↓'}
+                </button>
+              )}
+            </div>
           )}
         </div>
       </div>
