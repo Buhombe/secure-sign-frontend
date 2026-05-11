@@ -263,7 +263,7 @@ async function addSigners(documentId, signers) {
     return `($${offset + 1}, $${offset + 2}, $${offset + 3})`;
   }).join(', ');
 
-  const params = signers.flatMap((s, i) => [documentId, s.email.toLowerCase(), i + 1]);
+  const params = signers.flatMap((s, i) => [documentId, (typeof s === "string" ? s : s.email).toLowerCase(), i + 1]);
 
   await pool.query(
     `INSERT INTO document_signers (document_id, email, order_num)
