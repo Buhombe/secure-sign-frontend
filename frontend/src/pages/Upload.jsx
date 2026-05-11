@@ -47,7 +47,7 @@ export default function Upload() {
         // Phase 8: add signers WITHOUT dispatching emails yet — sender will
         // place fields next, then dispatch from the PlaceFields page.
         await api.post(`/signers/${documentId}/add`, {
-          signers: validSigners,
+          signers: validSigners.map(email => ({ email })),
           dispatch: false,
         });
         navigate(`/place-fields/${documentId}`);
