@@ -30,7 +30,7 @@ const {
 } = require('../services/emailService');
 const { enqueueVerificationEmail, enqueuePasswordResetEmail } = require('../queues/producers');
 const { uploadPhoto, deletePhoto } = require('../services/storageService');
-const { csrfRotate, clearTokenCookie } = require('../middleware/csrf');
+const { csrfRotate, clearTokenCookie, csrfTokenRoute } = require('../middleware/csrf');
 const { v4: uuidv4 } = require('uuid');
 
 // ── Multer for profile photos — memory storage (Fix 4: Cloudinary) ────────────
@@ -95,6 +95,9 @@ async function clearFailedAttempts(userId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/auth/csrf-token
+router.get('/csrf-token', csrfTokenRoute);
+
 // POST /api/auth/signup
 // Phase 2: generates a verification token, stores its SHA-256 hash in DB,
 // and emails a one-time link to the user. Account is created immediately but
