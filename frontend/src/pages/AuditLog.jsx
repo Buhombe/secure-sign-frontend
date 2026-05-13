@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import api from '../services/api';
+import { useState } from 'react';
 import AppShell from '../components/AppShell';
+import { useAuditLog } from '../lib/queries';
+import { AuditRowSkeleton } from '../components/Skeletons';
 
 const ACTION_META = {
   SIGN:                    { label: 'Signed',           bg: '#dcfce7', fg: '#15803d', icon: '✍️' },
@@ -36,17 +37,11 @@ function timeAgo(dateStr) {
 }
 
 export default function AuditLog() {
-  const [logs, setLogs]         = useState([]);
-  const [loading, setLoading]   = useState(true);
   const [filter, setFilter]     = useState('all');
   const [search, setSearch]     = useState('');
 
-  useEffect(() => {
-    api.get('/audit?limit=100')
-      .then(({ data }) => setLogs(data.logs))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
+  const { data, isLoading: loading, isError } = useAuditLog();
+  const logs = data?.logs ?? [];
 
   const filters = [
     { key: 'all',      label: 'All' },

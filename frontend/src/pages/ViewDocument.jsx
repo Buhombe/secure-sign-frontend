@@ -3,9 +3,12 @@ import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import * as pdfjsLib from 'pdfjs-dist';
 import api from '../services/api';
-import { getAuditLog, getStatusStyle } from '../services/documentApi';
+import { getStatusStyle } from '../services/documentApi';
+import { useDocument, useSigners, useAuditLog, useSendDocument, useVoidDocument, useRemindDocument } from '../lib/queries';
 import WorkflowTracker from '../components/WorkflowTracker';
 import AppShell from '../components/AppShell';
+import { useToast } from '../context/ToastContext';
+import { ViewDocumentSkeleton } from '../components/Skeletons';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
 
@@ -37,57 +40,53 @@ export default function ViewDocument() {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const [doc, setDoc] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const { toast } = useToast();
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
   const [pdfDoc, setPdfDoc] = useState(null);
   const [pdfError, setPdfError] = useState('');
   const [tab, setTab] = useState('workflow');
-  const [auditLog, setAuditLog] = useState([]);
-  const [auditLoad, setAuditLoad] = useState(false);
   const [actionMsg, setActionMsg] = useState('');
   const [actionErr, setActionErr] = useState('');
   const canvasRef = useRef();
 
-  // Load document + signers
-  useEffect(() => {
-    const load = async () => {
-      try {
-        const { data } = await api.get(`/documents/${id}`);
-        const docData = data.document || data;
+  // ── TanStack Query — document, signers, audit (cached + deduplicated) ─────
+  const { data: docRaw, isLoading: loading } = useDocument(id);
+  const { data: signersData } = useSigners(id);
+  const { data: auditData, isLoading: auditLoad } = useAuditLog(tab === 'audit' ? id : null);
 
-        try {
-          const signersRes = await api.get(`/signers/${id}`);
-          const raw = signersRes.data;
-          docData.workflowSteps = Array.isArray(raw) ? raw : (raw.signers || []);
-        } catch {
-          docData.workflowSteps = [];
-        }
-
-        setDoc(docData);
-
-        // Load PDF
-        try {
-          const r = await fetch(`${API_BASE}/documents/${id}/stream`, {
-            headers: { Authorization: `Bearer ${getToken()}` },
-          });
-          if (!r.ok) throw new Error('Stream failed');
-          const buf = await r.arrayBuffer();
-          const loaded = await pdfjsLib.getDocument({ data: buf }).promise;
-          setPdfDoc(loaded);
-          setNumPages(loaded.numPages);
-        } catch {
-          setPdfError('Could not load PDF preview.');
-        }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setLoading(false);
+  const doc = docRaw
+    ? {
+        ...(docRaw.document || docRaw),
+        workflowSteps: signersData
+          ? (Array.isArray(signersData) ? signersData : (signersData.signers || []))
+          : [],
       }
-    };
-    load();
-  }, [id]);
+    : null;
+  const auditLog = auditData?.logs ?? [];
+
+  const sendMutation   = useSendDocument();
+  const voidMutation   = useVoidDocument();
+  const remindMutation = useRemindDocument();
+
+  // ── Load PDF whenever the resolved document changes ──────────────────────
+  useEffect(() => {
+    if (!doc) return;
+    (async () => {
+      try {
+        const r = await fetch(`${API_BASE}/documents/${id}/stream`, {
+          headers: { Authorization: `Bearer ${getToken()}` },
+        });
+        if (!r.ok) throw new Error('Stream failed');
+        const buf = await r.arrayBuffer();
+        const loaded = await pdfjsLib.getDocument({ data: buf }).promise;
+        setPdfDoc(loaded);
+        setNumPages(loaded.numPages);
+      } catch {
+        setPdfError('Could not load PDF preview.');
+      }
+    })();
+  }, [id, doc?.id]);  // re-load if document ID changes
 
   // Render PDF page — fills container width on both mobile and desktop
   useEffect(() => {

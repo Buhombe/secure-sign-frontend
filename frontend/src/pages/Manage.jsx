@@ -4,8 +4,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import { getStatusStyle } from '../services/documentApi';
-import { useDocumentPagination } from '../hooks/useDocumentPagination';
+import { useInfiniteDocuments, useRegenerateSignerLink } from '../lib/queries';
 import AppShell from '../components/AppShell';
+import { DocumentTableSkeleton } from '../components/Skeletons';
 
 function useDebounced(value, delay = 350) {
   const [debounced, setDebounced] = useState(value);
@@ -140,22 +141,27 @@ export default function Manage() {
   const [downloading, setDownloading] = useState({});
 
   const {
-    documents,
-    total,
-    hasMore,
-    loadedCount,
-    loading,
-    loadingMore,
+    data: infiniteData,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage: loadingMore,
+    isLoading: loading,
+    isError,
     error,
-    loadMore,
-    retry,
-  } = useDocumentPagination({
+    refetch: retry,
+  } = useInfiniteDocuments({
     status: filter,
     search,
     sort:   'created_at',
     dir:    'desc',
     limit:  25,
   });
+
+  const documents = infiniteData?.pages?.flatMap(p => p.documents) ?? [];
+  const total = infiniteData?.pages?.[0]?.total ?? 0;
+  const loadedCount = documents.length;
+  const hasMore = hasNextPage ?? false;
+  const loadMore = fetchNextPage;
 
   // Fetch signers for each newly loaded document
   useEffect(() => {

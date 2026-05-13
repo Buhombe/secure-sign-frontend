@@ -14,10 +14,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import api from '../services/api';
-import { getStatusStyle, getDocumentStats } from '../services/documentApi';
-import { useDocumentPagination } from '../hooks/useDocumentPagination';
+import { getStatusStyle } from '../services/documentApi';
+import { useDocumentStats, useInfiniteDocuments } from '../lib/queries';
 import AppShell from '../components/AppShell';
+import { StatCardSkeleton, DocumentTableSkeleton } from '../components/Skeletons';
 
 // ── Debounce hook ─────────────────────────────────────────────────────────────
 // Prevents a new API call on every keystroke in the search box.
@@ -291,36 +291,33 @@ export default function Dashboard() {
   const [searchRaw,  setSearchRaw]  = useState('');
   const search = useDebounced(searchRaw, 350);
 
-  // ── Stats (separate from doc list — loads independently) ──────────────────
-  const [stats,       setStats]       = useState(null);
-  const [statsLoading, setStatsLoading] = useState(true);
+  // ── Stats — TanStack Query (cached, background-refreshed) ────────────────
+  const { data: stats, isLoading: statsLoading } = useDocumentStats();
 
-  useEffect(() => {
-    setStatsLoading(true);
-    api.get('/documents/stats')
-      .then(r => setStats(r.data.stats))
-      .catch(() => setStats(null))
-      .finally(() => setStatsLoading(false));
-  }, []);
-
-  // ── Paginated document list ────────────────────────────────────────────────
+  // ── Infinite paginated documents — TanStack Query ─────────────────────────
   const {
-    documents,
-    total,
-    hasMore,
-    loadedCount,
-    loading,
-    loadingMore,
+    data: infiniteData,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage: loadingMore,
+    isLoading: loading,
+    isError,
     error,
-    loadMore,
-    retry,
-  } = useDocumentPagination({
+    refetch: retry,
+  } = useInfiniteDocuments({
     status: filter,
     search,
     sort:   sortField,
     dir:    sortDir,
     limit:  25,
   });
+
+  // Flatten all pages into a single documents array
+  const documents = infiniteData?.pages?.flatMap(p => p.documents) ?? [];
+  const total = infiniteData?.pages?.[0]?.total ?? 0;
+  const loadedCount = documents.length;
+  const hasMore = hasNextPage ?? false;
+  const loadMore = fetchNextPage;
 
   // ── Filter definitions ─────────────────────────────────────────────────────
   const FILTERS = [

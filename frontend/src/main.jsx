@@ -1,59 +1,50 @@
 /**
  * main.jsx — HakikiSign App Entry Point
  *
- * WIRING ORDER:
- *   1. AuthProvider: provides auth state and token management
- *   2. ApiConfigurer: connects AuthContext callbacks to Axios interceptors
- *   3. CsrfBootstrapper: fetches initial CSRF token before first mutation
- *   4. App: renders routes
+ * PROVIDER WIRING ORDER (innermost dependencies first):
+ *   1. AuthProvider          — auth state + token management (no deps)
+ *   2. ApiConfigurer         — wires AuthContext → Axios interceptors
+ *   3. CsrfBootstrapper      — fetches initial CSRF token
+ *   4. QueryClientProvider   — TanStack Query: server-state management
+ *   5. ToastProvider         — global notification system
+ *   6. App                   — router + pages
  *
- * WHY SEPARATE ApiConfigurer AND CsrfBootstrapper?
- * ══════════════════════════════════════════════════════════════════════════════
- * ApiConfigurer must run first (before any API calls) to wire up the
- * interceptors. It uses useAuth() and must be inside AuthProvider.
+ * WHY QueryClientProvider WRAPS App (not inside it):
+ *   All pages and hooks use useQuery/useMutation. They must be inside the
+ *   QueryClientProvider tree. Placing it here ensures the queryClient is
+ *   available to every route, including lazily-loaded ones.
  *
- * CsrfBootstrapper runs after ApiConfigurer is mounted — it will use the
- * now-configured axios instance. Keeping them separate avoids a single
- * component doing too much and makes each concern testable independently.
- *
- * WHY NOT FETCH CSRF IN AuthProvider?
- * ══════════════════════════════════════════════════════════════════════════════
- * AuthProvider must be side-effect-free to avoid circular dependency.
- * AuthProvider → api.js → AuthProvider would create a dependency cycle.
- * The hook approach breaks this cycle: AuthProvider exports callbacks,
- * api.js consumes them, and the hook calls api.js after both are wired.
+ * QUERY CLIENT LIFECYCLE:
+ *   On logout, queryClient.clear() is called (in ApiConfigurer's onLogout)
+ *   to wipe all cached server state. This prevents data leakage between
+ *   different user sessions on shared devices.
  */
 
 import { StrictMode } from 'react';
-import { createRoot }  from 'react-dom/client';
+import { createRoot } from 'react-dom/client';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
 import './index.css';
 import App from './App.jsx';
 import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 import { configureApiAuth } from './services/api.js';
 import { useCsrfBootstrap } from './hooks/useCsrfBootstrap.js';
+import { queryClient } from './lib/queryClient.js';
+import { ToastProvider } from './context/ToastContext.jsx';
 
 /**
- * ApiConfigurer
- *
- * Mounts inside AuthProvider. On first render, wires the AuthContext
- * callbacks into the Axios interceptors via configureApiAuth().
- *
- * This component renders its children immediately — it does not delay
- * rendering for CSRF initialization. If a user triggers an action before
- * CSRF is bootstrapped, the interceptor's recovery path handles it.
+ * ApiConfigurer — wires AuthContext callbacks into the Axios interceptors.
+ * Must be inside AuthProvider. Runs synchronously on first render.
  */
 function ApiConfigurer({ children }) {
   const { getToken, updateToken, logout } = useAuth();
 
-  // Wire once — these callbacks are stable (wrapped in useCallback in AuthContext).
-  // configureApiAuth() is idempotent; calling it again overwrites the previous
-  // callbacks. In StrictMode this runs twice in dev — that's fine.
   configureApiAuth({
     getToken,
     updateToken,
     onLogout: () => {
-      // logout() clears auth state server-side + locally.
-      // Then redirect to login page.
+      // Clear all server-state caches on logout — no stale data for next user
+      queryClient.clear();
       logout().finally(() => {
         window.location.href = '/login';
       });
@@ -64,13 +55,8 @@ function ApiConfigurer({ children }) {
 }
 
 /**
- * CsrfBootstrapper
- *
- * Fetches the CSRF token once on app mount. Must be inside ApiConfigurer
- * (so interceptors are wired) and AuthProvider (so csrfBootstrapped ref
- * is accessible).
- *
- * Renders children immediately — does not gate rendering on CSRF readiness.
+ * CsrfBootstrapper — fetches the initial CSRF token on app mount.
+ * Must be inside ApiConfigurer (interceptors wired) and AuthProvider.
  */
 function CsrfBootstrapper({ children }) {
   useCsrfBootstrap();
@@ -83,7 +69,13 @@ createRoot(document.getElementById('root')).render(
     <AuthProvider>
       <ApiConfigurer>
         <CsrfBootstrapper>
-          <App />
+          <QueryClientProvider client={queryClient}>
+            <ToastProvider>
+              <App />
+            </ToastProvider>
+            {/* DevTools: zero-cost in production (tree-shaken) */}
+            {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
+          </QueryClientProvider>
         </CsrfBootstrapper>
       </ApiConfigurer>
     </AuthProvider>
