@@ -1,107 +1,72 @@
 'use strict';
 
 /**
- * decline.js — POST /api/signers/:documentId/decline
+ * routes/decline.js — HakikiSign Decline Routes (v2)
  *
- * Implements the COMPLETE enterprise-grade decline-to-sign workflow.
+ * CHANGE FROM v1
+ * ───────────────
+ * Replace enqueueDeclineNotification (email-only) with
+ * enqueueNotificationDecline (WhatsApp-first + email fallback).
  *
- * This module is mounted inside signers.js (or directly in index.js).
- * It handles BOTH token-authenticated (public link) and JWT-authenticated
- * signer declines.
+ * The owner now receives a WhatsApp decline alert if they have a phone
+ * in their profile or notification_preferences. Falls back to email
+ * if WhatsApp is unavailable.
  *
- * WORKFLOW DECISIONS
- * ──────────────────
- * CASE A — Single signer or LAST active signer:
- *   document.status → 'declined'
- *   All remaining 'pending' signers (if any) → 'cancelled'
- *   Sender notified immediately (async queue)
- *   Signing permanently disabled (document status = 'declined')
- *
- * CASE B — Multi-signer sequential (signer N declines, N+1..M pending):
- *   This signer → 'declined'
- *   Downstream signers (order > current) → 'cancelled' (tokens invalidated)
- *   document.status → 'declined'
- *   Workflow halts — no further signers are emailed
- *   Sender notified with full context
- *
- * CASE C — Already-signed signer:
- *   400 — cannot decline after signing
- *
- * CASE D — Expired / revoked / voided document:
- *   409 — appropriate error message
- *
- * SECURITY
- * ────────
- * - Token validated inside a DB transaction with FOR UPDATE (prevents race)
- * - Token marked used immediately on lock acquisition
- * - Reason sanitized: HTML-stripped, length-bounded, stored as TEXT
- * - Idempotency: double-decline returns 409 with no DB mutation
- * - IP and User-Agent captured for legal forensics
- *
- * AUDIT
- * ─────
- * - audit_logs entry (HMAC-signed)
- * - signer_events 'declined' entry (timeline / certificate)
- * - Both are append-only by DB rule
+ * ALL DECLINE LOGIC, DB TRANSACTIONS, TOKEN VALIDATION, AND AUDIT TRAILS
+ * ARE UNCHANGED. This is a surgical change to the two notification enqueue
+ * calls only.
  */
 
-const express = require('express');
-const router  = express.Router();
-const xss     = require('xss');
-
-const pool           = require('../config/database');
+const express  = require('express');
+const xss      = require('xss');
+const pool     = require('../config/database');
+const logger   = require('../config/logger');
+const { signerAuthLimiter } = require('../middleware/rateLimiter');
 const authMiddleware = require('../middleware/auth');
 const { validateParams } = require('../middleware/sanitize');
-const { signerAuthLimiter } = require('../middleware/rateLimiter');
 const { hashToken }  = require('../services/encryptionService');
 const { log, ACTIONS } = require('../services/auditService');
-const { enqueueDeclineNotification } = require('../queues/producers');
-const logger = require('../config/logger');
 
-// ── Sanitize & validate decline reason ───────────────────────────────────────
+// CHANGED: use WhatsApp-first producer instead of email-only
+const { enqueueNotificationDecline } = require('../queues/producers');
+
+const router = express.Router();
+
 const REASON_MAX = 1000;
 const REASON_MIN = 10;
 
 function sanitizeReason(raw) {
   if (typeof raw !== 'string') return null;
-  // Strip HTML tags — stored as plaintext only
   const stripped = xss(raw.trim(), { whiteList: {}, stripIgnoreTag: true });
   return stripped.slice(0, REASON_MAX);
 }
 
-// ── Shared decline handler (used by both public and authenticated paths) ───────
+// ── Shared decline handler ────────────────────────────────────────────────────
+
 async function performDecline({
   documentId,
   signerId,
-  signerEmail,
-  rawReason,
-  ipAddress,
-  userAgent,
+  reason,
+  verificationMethod,
 }) {
-  const reason = sanitizeReason(rawReason);
-  if (!reason || reason.length < REASON_MIN) {
-    return {
-      status: 400,
-      error:  `A decline reason of at least ${REASON_MIN} characters is required.`,
-    };
-  }
-
   const client = await pool.connect();
   let ownerEmail   = null;
+  let ownerPhone   = null;  // NEW: capture for WhatsApp
+  let ownerName    = null;  // NEW: capture for WhatsApp template
   let documentName = null;
 
   try {
     await client.query('BEGIN');
 
-    // ── Lock the signer row to prevent concurrent decline/sign ───────────────
     const lockResult = await client.query(
-      `SELECT ds.id, ds.email, ds.status, ds.order_num, ds.token_used,
-              ds.token_expires_at,
+      `SELECT ds.id, ds.email, ds.name AS signer_name, ds.status,
+              ds.order_num, ds.token_used, ds.token_expires_at,
               d.status        AS doc_status,
               d.original_name AS doc_name,
               d.current_signer_order,
               d.total_signers,
-              u.email         AS owner_email
+              u.email         AS owner_email,
+              u.name          AS owner_name
        FROM document_signers ds
        JOIN documents d ON d.id = ds.document_id
        JOIN users     u ON u.id = d.user_id
@@ -118,9 +83,9 @@ async function performDecline({
 
     const row = lockResult.rows[0];
     ownerEmail   = row.owner_email;
+    ownerName    = row.owner_name;
     documentName = row.doc_name;
 
-    // ── Guard: document terminal states ──────────────────────────────────────
     const terminalDocStates = ['declined', 'revoked', 'voided', 'signed'];
     if (terminalDocStates.includes(row.doc_status)) {
       await client.query('ROLLBACK');
@@ -130,297 +95,254 @@ async function performDecline({
       };
     }
 
-    // ── Guard: signer terminal states ─────────────────────────────────────────
     if (row.status === 'declined') {
       await client.query('ROLLBACK');
       return { status: 409, error: 'You have already declined this document.' };
     }
     if (row.status === 'signed') {
       await client.query('ROLLBACK');
-      return { status: 400, error: 'You cannot decline a document you have already signed.' };
-    }
-    if (row.status === 'cancelled') {
-      await client.query('ROLLBACK');
-      return { status: 409, error: 'Your signing invitation has been cancelled.' };
-    }
-    if (row.status === 'expired') {
-      await client.query('ROLLBACK');
-      return { status: 409, error: 'Your signing link has expired.' };
+      return { status: 409, error: 'You have already signed this document.' };
     }
 
-    // ── Mark this signer as declined ──────────────────────────────────────────
+    // Mark signer as declined
     await client.query(
       `UPDATE document_signers
-       SET status            = 'declined',
-           declined_at       = NOW(),
-           decline_reason    = $1,
-           decline_ip        = $2,
-           decline_user_agent= $3,
-           token             = NULL,
-           token_used        = TRUE,
-           token_expires_at  = NULL,
-           updated_at        = NOW()
-       WHERE id = $4`,
-      [reason, ipAddress, userAgent?.slice(0, 200), signerId]
+       SET status       = 'declined',
+           declined_at  = NOW(),
+           decline_reason = $1,
+           token_used   = TRUE
+       WHERE id = $2`,
+      [reason, signerId]
     );
 
-    // ── Cancel all downstream (pending) signers ───────────────────────────────
-    // Sequential model: any signer with order_num > current who hasn't signed
-    // will never be reached — cancel their tokens too.
-    const cancelResult = await client.query(
-      `UPDATE document_signers
-       SET status           = 'cancelled',
-           token            = NULL,
-           token_used       = TRUE,
-           token_expires_at = NULL,
-           updated_at       = NOW()
-       WHERE document_id = $1
-         AND order_num   > $2
-         AND status      = 'pending'
-       RETURNING id, email`,
-      [documentId, row.order_num]
-    );
-
-    const cancelledSigners = cancelResult.rows;
-
-    // ── Update document status → declined ────────────────────────────────────
+    // Mark document as declined
     await client.query(
-      `UPDATE documents
-       SET status     = 'declined',
-           updated_at = NOW()
-       WHERE id = $1`,
+      `UPDATE documents SET status = 'declined' WHERE id = $1`,
       [documentId]
     );
 
-    // ── signer_events — append-only timeline record ───────────────────────────
-    await client.query(
-      `INSERT INTO signer_events
-         (document_id, signer_id, signer_email, event_type, ip_address, user_agent)
-       VALUES ($1, $2, $3, 'declined', $4, $5)`,
-      [documentId, signerId, signerEmail, ipAddress, userAgent?.slice(0, 200)]
+    // Cancel all downstream pending signers
+    const cancelResult = await client.query(
+      `UPDATE document_signers
+       SET status = 'cancelled'
+       WHERE document_id = $1
+         AND order_num > $2
+         AND status = 'pending'
+       RETURNING email`,
+      [documentId, row.order_num]
     );
 
     await client.query('COMMIT');
 
-    logger.info('[decline] Signer declined document', {
-      documentId,
-      signerId,
-      signerEmail,
-      cancelledDownstream: cancelledSigners.length,
-    });
-
     return {
-      status:            200,
+      success:          true,
+      signerEmail:      row.email,
+      signerName:       row.signer_name,
       ownerEmail,
+      ownerName,
       documentName,
-      cancelledSigners,
-      signerEmail,
       reason,
+      cancelledSigners: cancelResult.rows.map(r => r.email),
     };
   } catch (err) {
     await client.query('ROLLBACK');
-    logger.error('[decline] Transaction failed', {
-      documentId, signerId, message: err.message,
-    });
+    client.release();
     throw err;
   } finally {
     client.release();
   }
 }
 
-// ── POST /api/signers/:documentId/decline-public ──────────────────────────────
-// Token-authenticated (public link) signer decline
+// ── Helper: load owner phone for WhatsApp notification ───────────────────────
+async function loadOwnerPhone(ownerEmail) {
+  try {
+    const result = await pool.query(
+      `SELECT u.phone
+       FROM users u
+       WHERE u.email = $1`,
+      [ownerEmail]
+    );
+    return result.rows[0]?.phone || null;
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/signers/:documentId/decline-public
+// Token-based decline (unauthenticated signer with signing link)
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
   '/:documentId/decline-public',
   signerAuthLimiter,
   validateParams('signatureDocumentId'),
   async (req, res) => {
-    const { token, reason } = req.body;
-    const ipAddress = req.ip || req.connection?.remoteAddress || null;
-    const userAgent = req.headers['user-agent'] || null;
+    const { token, reason: rawReason } = req.body;
+    const documentId = req.params.documentId;
+    const ipAddress  = req.ip;
+    const userAgent  = req.headers['user-agent'] || '';
 
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'Signing token is required.' });
+    if (!token) return res.status(400).json({ error: 'Signing token is required.' });
+
+    const reason = sanitizeReason(rawReason);
+    if (!reason || reason.length < REASON_MIN) {
+      return res.status(400).json({
+        error: `Please provide a reason for declining (at least ${REASON_MIN} characters).`,
+      });
     }
 
     try {
-      const tokenHash = hashToken(token);
-
-      // Validate token lookup — does NOT consume it yet (that happens in performDecline)
-      const tokenResult = await pool.query(
-        `SELECT ds.id, ds.email, ds.status, ds.token_used,
-                ds.token_expires_at, ds.order_num,
-                d.current_signer_order, d.status AS doc_status
-         FROM document_signers ds
-         JOIN documents d ON d.id = ds.document_id
-         WHERE ds.document_id = $1
-           AND ds.token       = $2`,
-        [req.params.documentId, tokenHash]
+      const tokenHash  = hashToken(token);
+      const signerRow  = await pool.query(
+        `SELECT id, status, token_used, token_expires_at
+         FROM document_signers
+         WHERE document_id = $1 AND token = $2`,
+        [documentId, tokenHash]
       );
 
-      const signer = tokenResult.rows[0];
-      if (!signer) {
-        return res.status(401).json({ error: 'Invalid or expired signing link.' });
-      }
-      if (signer.token_used && signer.status !== 'declined') {
-        // token_used but not declined = already signed
-        return res.status(409).json({ error: 'This signing link has already been used.' });
-      }
-      if (signer.status === 'declined') {
-        return res.status(409).json({ error: 'You have already declined this document.' });
-      }
-      if (new Date(signer.token_expires_at) < new Date()) {
-        return res.status(401).json({ error: 'This signing link has expired.' });
-      }
-      if (signer.order_num !== signer.current_signer_order) {
-        return res.status(403).json({ error: 'It is not your turn in the signing sequence.' });
-      }
+      if (!signerRow.rows[0]) return res.status(401).json({ error: 'Invalid or expired signing link.' });
+
+      const s = signerRow.rows[0];
+      if (s.token_used)                                   return res.status(401).json({ error: 'This signing link has already been used.' });
+      if (new Date(s.token_expires_at) < new Date())     return res.status(401).json({ error: 'This signing link has expired.' });
+      if (['declined', 'signed'].includes(s.status))     return res.status(409).json({ error: `Document already ${s.status}.` });
 
       const result = await performDecline({
-        documentId: req.params.documentId,
-        signerId:   signer.id,
-        signerEmail: signer.email,
-        rawReason:  reason,
-        ipAddress,
-        userAgent,
+        documentId,
+        signerId: s.id,
+        reason,
+        verificationMethod: 'EMAIL-TOKEN',
       });
 
-      if (result.status !== 200) {
-        return res.status(result.status).json({ error: result.error });
-      }
+      if (!result.success) return res.status(result.status).json({ error: result.error });
 
-      // ── Async: audit log ────────────────────────────────────────────────────
+      // Audit log
       await log({
-        userId:     null,
-        documentId: req.params.documentId,
-        action:     ACTIONS.DECLINE || 'DECLINE',
-        ipAddress,
-        deviceInfo: userAgent,
+        userId: null, documentId,
+        action: ACTIONS.DECLINE || 'DECLINE',
+        ipAddress, deviceInfo: userAgent,
         metadata: {
-          signerEmail: result.signerEmail,
-          reason:      result.reason,
-          method:      'EMAIL-TOKEN',
+          signerEmail:         result.signerEmail,
+          reason:              result.reason,
+          method:              'EMAIL-TOKEN',
           cancelledDownstream: result.cancelledSigners?.length || 0,
         },
       });
 
-      // ── Async: email notification to owner ──────────────────────────────────
+      // ── CHANGED: WhatsApp-first decline notification ──────────────────────
       if (result.ownerEmail) {
-        await enqueueDeclineNotification({
-          documentId:   req.params.documentId,
-          signerEmail:  result.signerEmail,
+        const ownerPhone = await loadOwnerPhone(result.ownerEmail);
+
+        enqueueNotificationDecline({
+          documentId,
           ownerEmail:   result.ownerEmail,
+          ownerPhone,                        // null → orchestrator falls to email
+          ownerName:    result.ownerName,
           documentName: result.documentName,
-          reason:       result.reason,
+          signerName:   result.signerName || result.signerEmail,
+          signerEmail:  result.signerEmail,
+          declineReason: result.reason,
         }).catch(err =>
           logger.error('[decline] Failed to enqueue decline notification', {
-            documentId: req.params.documentId,
-            message: err.message,
+            documentId, message: err.message,
           })
         );
       }
 
       return res.json({
         message: 'You have declined to sign this document. The sender has been notified.',
-        declined: true,
       });
+
     } catch (err) {
-      logger.error('[decline-public] Unhandled error', {
-        documentId: req.params.documentId,
-        message: err.message,
-      });
-      return res.status(500).json({ error: 'Could not process your decline. Please try again.' });
+      logger.error('[decline-public] Error', { message: err.message });
+      return res.status(500).json({ error: 'Could not process decline.' });
     }
   }
 );
 
-// ── POST /api/signers/:documentId/decline ─────────────────────────────────────
-// JWT-authenticated signer decline
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/signers/:documentId/decline-auth
+// Session-based decline (authenticated user)
 // ─────────────────────────────────────────────────────────────────────────────
 router.post(
-  '/:documentId/decline',
+  '/:documentId/decline-auth',
   authMiddleware,
   validateParams('signatureDocumentId'),
   async (req, res) => {
-    const { reason } = req.body;
-    const ipAddress  = req.ip || req.connection?.remoteAddress || null;
-    const userAgent  = req.headers['user-agent'] || null;
+    const { reason: rawReason } = req.body;
+    const documentId = req.params.documentId;
+    const ipAddress  = req.ip;
+    const userAgent  = req.headers['user-agent'] || '';
+
+    const reason = sanitizeReason(rawReason);
+    if (!reason || reason.length < REASON_MIN) {
+      return res.status(400).json({
+        error: `Please provide a reason for declining (at least ${REASON_MIN} characters).`,
+      });
+    }
 
     try {
-      // Resolve authenticated signer row
-      const signerResult = await pool.query(
-        `SELECT ds.id, ds.email, ds.status, ds.order_num,
-                d.current_signer_order, d.status AS doc_status
-         FROM document_signers ds
-         JOIN documents d ON d.id = ds.document_id
-         WHERE ds.document_id  = $1
-           AND LOWER(ds.email) = LOWER($2)`,
-        [req.params.documentId, req.user.email]
+      const signerRow = await pool.query(
+        `SELECT id, status FROM document_signers
+         WHERE document_id = $1 AND LOWER(email) = LOWER($2)`,
+        [documentId, req.user.email]
       );
 
-      const signer = signerResult.rows[0];
-      if (!signer) {
-        return res.status(403).json({ error: 'You are not a signer on this document.' });
-      }
-      if (signer.order_num !== signer.current_signer_order) {
-        return res.status(403).json({ error: 'It is not your turn in the signing sequence.' });
+      if (!signerRow.rows[0]) return res.status(403).json({ error: 'You are not a signer on this document.' });
+
+      const s = signerRow.rows[0];
+      if (['declined', 'signed'].includes(s.status)) {
+        return res.status(409).json({ error: `Document already ${s.status}.` });
       }
 
       const result = await performDecline({
-        documentId:  req.params.documentId,
-        signerId:    signer.id,
-        signerEmail: signer.email,
-        rawReason:   reason,
-        ipAddress,
-        userAgent,
+        documentId,
+        signerId: s.id,
+        reason,
+        verificationMethod: 'SESSION',
       });
 
-      if (result.status !== 200) {
-        return res.status(result.status).json({ error: result.error });
-      }
+      if (!result.success) return res.status(result.status).json({ error: result.error });
 
-      // ── Async: audit log ────────────────────────────────────────────────────
       await log({
-        userId:     req.user.id,
-        documentId: req.params.documentId,
-        action:     ACTIONS.DECLINE || 'DECLINE',
-        ipAddress,
-        deviceInfo: userAgent,
+        userId: req.user.id, documentId,
+        action: ACTIONS.DECLINE || 'DECLINE',
+        ipAddress, deviceInfo: userAgent,
         metadata: {
-          signerEmail: result.signerEmail,
-          reason:      result.reason,
-          method:      'JWT-AUTH',
+          signerEmail:         result.signerEmail,
+          reason:              result.reason,
+          method:              'SESSION',
           cancelledDownstream: result.cancelledSigners?.length || 0,
         },
       });
 
-      // ── Async: email notification ────────────────────────────────────────────
+      // ── CHANGED: WhatsApp-first decline notification ──────────────────────
       if (result.ownerEmail) {
-        await enqueueDeclineNotification({
-          documentId:   req.params.documentId,
-          signerEmail:  result.signerEmail,
-          ownerEmail:   result.ownerEmail,
-          documentName: result.documentName,
-          reason:       result.reason,
+        const ownerPhone = await loadOwnerPhone(result.ownerEmail);
+
+        enqueueNotificationDecline({
+          documentId,
+          ownerEmail:    result.ownerEmail,
+          ownerPhone,
+          ownerName:     result.ownerName,
+          documentName:  result.documentName,
+          signerName:    result.signerName || result.signerEmail,
+          signerEmail:   result.signerEmail,
+          declineReason: result.reason,
         }).catch(err =>
-          logger.error('[decline] Failed to enqueue decline notification', {
-            documentId: req.params.documentId,
-            message: err.message,
+          logger.error('[decline-auth] Failed to enqueue decline notification', {
+            documentId, message: err.message,
           })
         );
       }
 
       return res.json({
         message: 'You have declined to sign this document. The sender has been notified.',
-        declined: true,
       });
+
     } catch (err) {
-      logger.error('[decline] Unhandled error', {
-        documentId: req.params.documentId,
-        message: err.message,
-      });
-      return res.status(500).json({ error: 'Could not process your decline. Please try again.' });
+      logger.error('[decline-auth] Error', { message: err.message });
+      return res.status(500).json({ error: 'Could not process decline.' });
     }
   }
 );

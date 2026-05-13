@@ -1,251 +1,437 @@
-# HakikiSign — Enterprise Pagination: Testing & Verification Checklist
+# HakikiSign — Notification System Testing Checklist
 
-## A. SMALL DATASET TESTS (5–20 documents)
+## Pre-Test Setup
 
-### A1. First-page load
-- [ ] Dashboard loads without `.slice(0,20)` cap — all documents visible
-- [ ] Stats cards show accurate counts (no longer computed from truncated array)
-- [ ] "Showing X of Y" displays correct numbers (e.g. "Showing 12 of 12 documents")
-- [ ] "All 12 documents loaded" label appears in footer (no Load More button)
-- [ ] Progress bar shows 100% filled
-
-### A2. Empty state
-- [ ] New account with 0 docs shows empty state with Upload CTA
-- [ ] Applying a filter on an account with docs but no matches for that filter shows "No results found"
-- [ ] Clearing filters restores the document list without a page reload
-
-### A3. API verification
 ```bash
-# Verify response shape
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?limit=25" | jq '{total, hasMore, nextCursor, docCount: (.documents|length)}'
+# 1. Run migration
+psql $DATABASE_URL -f migrations/007_notification_system.sql
 
-# Expected for 12 docs:
-# { "total": 12, "hasMore": false, "nextCursor": null, "docCount": 12 }
+# 2. Verify tables created
+psql $DATABASE_URL -c "\dt notification_logs notification_preferences notification_templates webhook_events otp_send_log"
+
+# 3. Verify templates seeded
+psql $DATABASE_URL -c "SELECT key, channel, language FROM notification_templates ORDER BY key;"
+
+# 4. Verify document_signers columns added
+psql $DATABASE_URL -c "\d document_signers" | grep -E "whatsapp_phone|notif_channel|reminders_sent"
+
+# 5. Start worker with Twilio credentials
+TWILIO_ACCOUNT_SID=AC... TWILIO_AUTH_TOKEN=... TWILIO_WHATSAPP_FROM=+14155238886 \
+  node src/worker.js
+
+# 6. Expose local server for Twilio webhooks (dev only)
+npx ngrok http 5000
+# Copy https URL → update TWILIO_WEBHOOK_BASE_URL
 ```
 
 ---
 
-## B. LARGE DATASET TESTS (1,000+ documents)
+## A. WhatsApp Invitation Tests
 
-### B1. Pagination mechanics
-- [ ] First page loads 25 docs (default limit)
-- [ ] `nextCursor` is present in response, `hasMore: true`
-- [ ] Clicking "Load more" appends 25 more docs
-- [ ] `loadedCount` increments correctly after each load-more
-- [ ] "Showing 50 of 1247 loaded" displays correctly
-- [ ] Progress bar advances proportionally
+### A1 — WhatsApp invite sent when signer has phone
+```bash
+# Add signer with WhatsApp phone
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/add \
+  -H "Cookie: $SESSION" \
+  -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "signers": [{
+      "email": "signer@example.com",
+      "phone": "+255712345678",
+      "notif_channel": "whatsapp"
+    }]
+  }'
 
-### B2. No duplicate documents
-- [ ] Load page 1 (docs 1–25), then page 2 (docs 26–50)
-- [ ] Inspect rendered list — no document ID appears twice
-- [ ] This tests the `existingIds` deduplication in the hook
+# Expected: HTTP 200, message contains "via whatsapp"
+# Verify in DB: notification_logs row with channel='whatsapp', status='sent'
+psql $DATABASE_URL -c "SELECT channel, status, provider_id, sent_at FROM notification_logs ORDER BY created_at DESC LIMIT 1;"
 
-### B3. Filter state persistence
-- [ ] Set filter to "Pending", load 3 pages
-- [ ] Switch to "Completed" — list resets to page 1 of completed docs
-- [ ] Switch back to "Pending" — list resets (not retained — by design, avoids stale state)
-- [ ] Correct: filter changes always restart from page 1
-
-### B4. Search + pagination
-- [ ] Enter "Contract" in search — list resets and shows only matching docs
-- [ ] "Load more" continues with the same search filter applied
-- [ ] Clear search — list resets to unfiltered first page
-
-### B5. Database query verification
-```sql
--- Run EXPLAIN ANALYZE on staging to confirm index usage:
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT id, original_name, status, created_at, recipient_email, signed_at, signed_by
-FROM documents d
-WHERE d.user_id = '<uuid>'
-  AND d.is_deleted = FALSE
-  AND d.created_at < '2026-01-01T00:00:00Z'
-ORDER BY d.created_at DESC, d.id DESC
-LIMIT 26;
-
--- MUST show: "Index Only Scan using idx_documents_list_covering"
--- NOT:       "Seq Scan" or "Bitmap Heap Scan"
-
--- Verify count query uses index:
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT COUNT(*) FROM documents d
-WHERE d.user_id = '<uuid>' AND d.is_deleted = FALSE;
--- Should use: idx_documents_paginate_primary
+# Expected: WhatsApp message received on +255712345678
 ```
 
-### B6. Timing assertions
-| Dataset size | Expected GET /documents p95 |
-|---|---|
-| 100 docs     | < 10ms                       |
-| 1,000 docs   | < 20ms                       |
-| 10,000 docs  | < 50ms                       |
-| 100,000 docs | < 100ms                      |
+### A2 — Email fallback when no phone provided
+```bash
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/add \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"signers": ["emailonly@example.com"]}'
+
+# Expected: notification_logs channel='email', is_fallback=true OR channel='email' (direct)
+```
+
+### A3 — Legacy string-array signers still work (no regression)
+```bash
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/add \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"signers": ["alice@example.com", "bob@example.com"]}'
+
+# Expected: HTTP 200, both signers created, email sent to alice (order 1)
+```
 
 ---
 
-## C. MOBILE TESTS
+## B. WhatsApp Reminder Tests
 
-### C1. Slow network simulation (Chrome DevTools → Slow 3G)
-- [ ] Skeleton rows appear immediately on page load (not blank white)
-- [ ] Stats cards show pulse animation while loading
-- [ ] "Load more" button shows spinner while fetching
-- [ ] Search box is usable without triggering a request on every keystroke (debounce ≥ 350ms)
-- [ ] No UI freeze during fetch (React renders are non-blocking)
+### B1 — Reminder delivered via WhatsApp
+```bash
+# Insert a reminder job directly into BullMQ (simulate scheduler)
+node -e "
+const { enqueueNotificationReminder } = require('./src/queues/producers');
+enqueueNotificationReminder({
+  documentId: '$DOCUMENT_ID',
+  signerId: '$SIGNER_ID',
+  signingLink: 'https://example.com/sign/test#token=abc',
+  reminderNumber: 1
+}).then(() => { console.log('queued'); process.exit(0); });
+"
 
-### C2. Responsive layout
-- [ ] At 375px viewport: table headers hidden, rows stack vertically
-- [ ] Status badge left-aligned on mobile
-- [ ] Date left-aligned on mobile
-- [ ] Action buttons left-aligned and full-width on mobile
-- [ ] Filter pills scroll horizontally without wrapping awkwardly
-- [ ] "Load more" button visible and tappable (min 44px touch target)
+# Expected: WhatsApp message received, notification_logs status='sent'
+```
 
-### C3. Touch interactions
-- [ ] Filter pill tap triggers filter change without double-tap
-- [ ] "Load more" tap registers on first tap
-- [ ] Actions menu opens/closes with tap, closes on tap-outside
+### B2 — Anti-spam: second reminder within 24h suppressed
+```bash
+# Send two reminders back-to-back
+node -e "
+const { enqueueNotificationReminder } = require('./src/queues/producers');
+Promise.all([
+  enqueueNotificationReminder({ documentId: '$DOCUMENT_ID', signerId: '$SIGNER_ID', signingLink: '...', reminderNumber: 1 }),
+  enqueueNotificationReminder({ documentId: '$DOCUMENT_ID', signerId: '$SIGNER_ID', signingLink: '...', reminderNumber: 2 }),
+]).then(() => process.exit(0));
+"
 
-### C4. Network interruption recovery
-- [ ] While loading, kill network → error state appears with "Try again" button
-- [ ] Restore network, tap "Try again" → list loads correctly
-- [ ] Error clears, documents appear normally
-- [ ] Previously loaded documents (from earlier pages) are NOT lost on error
+# Expected: First job sends, second job logs 'suppressed: too_soon'
+# Check worker logs for: '[Orchestrator] Reminder suppressed { reason: too_soon }'
+```
+
+### B3 — Max reminder cap (3 by default)
+```bash
+# Set reminders_sent = 3 in DB
+psql $DATABASE_URL -c "UPDATE document_signers SET reminders_sent = 3 WHERE id = '$SIGNER_ID';"
+
+# Attempt to send another reminder
+node -e "
+const { enqueueNotificationReminder } = require('./src/queues/producers');
+enqueueNotificationReminder({ documentId: '$DOCUMENT_ID', signerId: '$SIGNER_ID', signingLink: '...', reminderNumber: 4 })
+  .then(() => process.exit(0));
+"
+
+# Expected: Worker logs 'max_reminders_reached', NO WhatsApp message sent
+```
 
 ---
 
-## D. SECURITY TESTS
+## C. OTP Tests
 
-### D1. Cursor tamper prevention
+### C1 — OTP sent via WhatsApp
 ```bash
-# Send a malformed cursor
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?cursor=INVALID_BASE64!!!"
-# Expected: 200 OK — treated as first page (no crash)
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/send-otp \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNING_TOKEN'"}'
 
-# Send a cursor with wrong shape
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?cursor=$(echo '{"evil":"true"}' | base64)"
-# Expected: 200 OK — cursor ignored, first page returned
-
-# Send a cursor with a future timestamp (attempting to skip to end)
-cursor=$(echo '{"ts":"2099-12-31T00:00:00Z","id":"00000000-0000-0000-0000-000000000000"}' | base64url)
-curl -H "Authorization: Bearer $TOKEN" "$API_BASE/documents?cursor=$cursor"
-# Expected: 200 OK, empty documents array (no docs after 2099), no error
+# Expected: HTTP 200, { channel: 'whatsapp', expiresAt: '...' }
+# Expected: WhatsApp message received with 6-digit code
 ```
 
-### D2. Cross-user isolation
+### C2 — OTP verification correct code
 ```bash
-# User A fetches their cursor, User B tries to use it
-CURSOR_A=$(curl -H "Authorization: Bearer $TOKEN_A" "$API_BASE/documents?limit=1" | jq -r .nextCursor)
-curl -H "Authorization: Bearer $TOKEN_B" "$API_BASE/documents?cursor=$CURSOR_A"
-# Expected: User B sees THEIR OWN documents, not User A's
-# The cursor only contains timestamp + id — no user data embedded
-# user_id is always sourced from the authenticated JWT, never the cursor
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/verify-otp \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNING_TOKEN'", "otpCode": "123456"}'
+
+# Expected (correct code): HTTP 200, { verified: true }
+# Expected (wrong code):   HTTP 400, { error: 'Incorrect code. 2 attempt(s) remaining.' }
 ```
 
-### D3. SQL injection via sort/status params
+### C3 — OTP rate limit (3 per 10 minutes)
 ```bash
-# Attempt SQL injection via sort parameter
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?sort=created_at;DROP TABLE documents--"
-# Expected: Whitelist rejects non-allowed sort values, uses default
-
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?status=' OR '1'='1"
-# Expected: Whitelist rejects, 'all' used as default
-```
-
-### D4. Search injection
-```bash
-# LIKE wildcards in search
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?search=%25%25%25%25%25"
-# Expected: Returns only docs matching "%%%%%", not all docs
-# The backend escapes % _ \ before using in ILIKE
-
-# Very long search string
-curl -H "Authorization: Bearer $TOKEN" \
-  "$API_BASE/documents?search=$(python3 -c 'print("A"*1000)')"
-# Expected: Truncated to 100 chars, no error
-```
-
-### D5. Rate limiting compatibility
-```bash
-# Rapid pagination requests (should hit rate limiter, not error)
-for i in $(seq 1 20); do
-  curl -s -o /dev/null -w "%{http_code}\n" \
-    -H "Authorization: Bearer $TOKEN" "$API_BASE/documents?limit=25"
+# Send 4 OTPs in quick succession
+for i in 1 2 3 4; do
+  curl -s -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/send-otp \
+    -H "Content-Type: application/json" \
+    -d '{"token": "'$SIGNING_TOKEN'"}' | jq .
 done
-# Expected: 200s until rate limit, then 429 — no 500s
+
+# Expected: first 3 succeed (HTTP 200), 4th returns HTTP 429
 ```
 
-### D6. Auth expiry handling
+### C4 — OTP expires after 10 minutes
 ```bash
-# Use an expired JWT
-curl -H "Authorization: Bearer EXPIRED_TOKEN" "$API_BASE/documents"
-# Expected: 401 Unauthorized
+# Expire the OTP artificially
+psql $DATABASE_URL -c "UPDATE document_signers SET otp_expires_at = NOW() - INTERVAL '1 second' WHERE id = '$SIGNER_ID';"
 
-# Frontend behavior: useDocumentPagination sets error.type='auth'
-# Dashboard shows "Session expired" error state
-# No infinite retry loop
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/verify-otp \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNING_TOKEN'", "otpCode": "000000"}'
+
+# Expected: HTTP 400, { error: 'Verification code expired. Request a new one.' }
 ```
 
 ---
 
-## E. FAILURE RECOVERY SCENARIOS
+## D. Completion & Decline Tests
 
-### E1. Document deleted between pages
-1. User loads page 1 (docs 1–25, cursor points at doc 25)
-2. Another session deletes doc 25
-3. User clicks "Load more" — cursor sends `created_at` of deleted doc
-4. Expected: Page 2 starts from the next doc after that timestamp
-   (WHERE created_at < cursor.ts). No gap, no crash, no duplicate.
+### D1 — Completion notification when all sign
+```bash
+# Sign as last signer — triggers completion
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/sign-public \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$LAST_SIGNER_TOKEN'", "signatureData": "data:image/png;base64,...", ...}'
 
-### E2. Concurrent "Load more" clicks
-1. User rapidly double-clicks "Load more"
-2. The button is disabled (`loadingMore = true`) after first click
-3. Expected: Only one request fires — no duplicated documents in list
+# Expected: notification_logs row with type='completion', channel='whatsapp' OR 'email'
+psql $DATABASE_URL -c "SELECT type, channel, status FROM notification_logs WHERE document_id = '$DOCUMENT_ID' AND notification_type = 'completion';"
+```
 
-### E3. Filter change during in-flight fetch
-1. Fetch starts for filter=all
-2. User immediately switches to filter=pending
-3. The hook increments requestId and aborts the previous request
-4. Expected: Only pending docs appear — no "all" docs flash in briefly
+### D2 — Decline notification (WhatsApp if owner has phone)
+```bash
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/decline-public \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNER_TOKEN'", "reason": "I do not agree with the terms of this contract."}'
 
-### E4. Stats API failure
-1. `/documents/stats` returns 500
-2. Expected: Stat cards show `—` instead of a number
-3. Document list continues to load normally (stats are independent)
-4. No unhandled promise rejection
+# Expected: notification_logs type='decline', owner notified
+```
 
 ---
 
-## F. PERFORMANCE BENCHMARKS
+## E. Webhook Tests
 
-### F1. Before vs. After comparison
+### E1 — Valid Twilio status webhook
+```bash
+# Simulate Twilio delivered callback (use actual Twilio test credentials in dev)
+# Twilio sandbox sends real callbacks when you send to sandbox number
 
-| Metric | Before (slice) | After (cursor pagination) |
-|--------|---------------|--------------------------|
-| Bytes fetched (100 docs) | ~15KB (all rows) | ~3.5KB (25 rows) |
-| Bytes fetched (10k docs) | ~1.5MB (all rows!) | ~3.5KB (25 rows) |
-| DB query time (10k docs) | ~200ms (full scan) | ~1ms (index scan) |
-| Initial render time | Blocked on full fetch | Shows skeletons instantly |
-| React array size | Grows unbounded | Max = loaded pages × 25 |
-| Stats accuracy | Wrong (only first 20) | Correct (DB-computed) |
+# Check DB updated after delivery
+psql $DATABASE_URL -c "SELECT status, delivered_at FROM notification_logs WHERE provider_id = '$MESSAGE_SID';"
+# Expected: status='delivered', delivered_at IS NOT NULL
+```
 
-### F2. Index verification query
-```sql
--- After running migration 006, verify indexes exist:
-SELECT indexname, indexdef
-FROM pg_indexes
-WHERE tablename = 'documents'
-ORDER BY indexname;
+### E2 — Replay attack prevention
+```bash
+# Send same webhook payload twice
+PAYLOAD='MessageSid=SM123&MessageStatus=delivered&To=whatsapp%3A%2B255712345678'
+SIG=$(node -e "
+const twilio = require('twilio');
+console.log(twilio.getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN, 'https://your-backend/api/webhooks/twilio/status', {MessageSid:'SM123',MessageStatus:'delivered',To:'whatsapp:+255712345678'}));
+")
 
--- Expected indexes:
--- idx_documents_list_covering
--- idx_documents_name_trgm
--- idx_documents_paginate_org
--- idx_documents_paginate_primary
--- idx_documents_paginate_status
+curl -X POST http://localhost:5000/api/webhooks/twilio/status \
+  -H "X-Twilio-Signature: $SIG" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "$PAYLOAD"
+
+curl -X POST http://localhost:5000/api/webhooks/twilio/status \
+  -H "X-Twilio-Signature: $SIG" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "$PAYLOAD"
+
+# Expected: first returns 200 OK, second returns 200 OK (idempotent, not processed twice)
+# Check: only ONE row in webhook_events for that payload_hash
+psql $DATABASE_URL -c "SELECT COUNT(*) FROM webhook_events WHERE payload_hash = (SELECT encode(digest('$PAYLOAD', 'sha256'), 'hex'));"
+```
+
+### E3 — Invalid webhook signature rejected
+```bash
+curl -X POST http://localhost:5000/api/webhooks/twilio/status \
+  -H "X-Twilio-Signature: invalidsignature" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "MessageSid=SM999&MessageStatus=delivered"
+
+# Expected: HTTP 403 Forbidden
+```
+
+---
+
+## F. Notification Preferences Tests
+
+### F1 — Get default preferences
+```bash
+curl http://localhost:5000/api/notifications/preferences \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF"
+
+# Expected: { primary_channel: 'whatsapp', fallback_channel: 'email', language: 'en', ... }
+```
+
+### F2 — Update to Kiswahili + email primary
+```bash
+curl -X PUT http://localhost:5000/api/notifications/preferences \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"language": "sw", "primary_channel": "email"}'
+
+# Expected: HTTP 200 with updated prefs
+# Next invite to this user's signers should use Kiswahili template
+```
+
+### F3 — Invalid channel rejected
+```bash
+curl -X PUT http://localhost:5000/api/notifications/preferences \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"primary_channel": "sms"}'
+
+# Expected: HTTP 422, { errors: [{ msg: 'primary_channel must be whatsapp or email' }] }
+```
+
+---
+
+## G. Failure & Recovery Tests
+
+### G1 — Twilio outage simulation (permanent error → email fallback)
+```bash
+# Temporarily set an invalid Twilio number to trigger permanent error
+TWILIO_WHATSAPP_FROM=+10000000000 node src/worker.js &
+
+# Enqueue an invite for a WhatsApp signer
+node -e "
+const { enqueueNotificationInvite } = require('./src/queues/producers');
+enqueueNotificationInvite({ documentId: '$DOCUMENT_ID', signerId: '$WA_SIGNER_ID', signingLink: '...' })
+  .then(() => process.exit(0));
+"
+
+# Expected:
+#   - WhatsApp attempt logs error in notification_logs (channel='whatsapp', status='failed')
+#   - Email fallback is triggered (channel='email', is_fallback=true, status='sent')
+#   - Signer receives email invite
+```
+
+### G2 — Transient error retry
+```bash
+# Observe BullMQ retry in worker logs
+# Worker logs should show:
+#   '[NotifWorker] Job failed { attempt: 1, isFinalFailure: false }'
+#   '[NotifWorker] Job failed { attempt: 2, isFinalFailure: false }'
+#   '[NotifWorker] send-signing-invite completed'  ← on recovery
+```
+
+### G3 — Dead letter after 5 failed attempts
+```bash
+# Check dead-lettered job logs
+# Worker logs show:
+#   '[NotifWorker] DEAD LETTER — notification permanently failed'
+# DB row:
+psql $DATABASE_URL -c "SELECT status FROM notification_logs WHERE job_id = '$FAILED_JOB_ID';"
+# Expected: status = 'undeliverable'
+```
+
+### G4 — Duplicate BullMQ job (idempotent)
+```bash
+# Enqueue same job ID twice
+node -e "
+const { notificationQueue } = require('./src/queues/index');
+Promise.all([
+  notificationQueue.add('send-signing-invite', { documentId: '$D', signerId: '$S', signingLink: '...' }, { jobId: 'notif:invite:$D:$S' }),
+  notificationQueue.add('send-signing-invite', { documentId: '$D', signerId: '$S', signingLink: '...' }, { jobId: 'notif:invite:$D:$S' }),
+]).then(() => process.exit(0));
+"
+
+# Expected: BullMQ deduplicates — only ONE job executes
+# notification_logs UNIQUE constraint on idempotency_key prevents duplicate rows
+```
+
+### G5 — Railway restart recovery
+```bash
+# Kill worker process mid-job
+kill -9 $(pgrep -f "node src/worker.js")
+
+# Restart worker
+node src/worker.js
+
+# Expected: BullMQ 'stalled' event detected, job requeued and completed
+# Worker logs: '[NotifWorker] Job stalled (lock expired)'
+```
+
+---
+
+## H. Channel Update Tests
+
+### H1 — Signer updates their channel to WhatsApp
+```bash
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/update-channel \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNER_TOKEN'", "phone": "+255712345678", "notif_channel": "whatsapp"}'
+
+# Expected: HTTP 200, { notif_channel: 'whatsapp', whatsapp_phone: '+25571234****' }
+# Next reminder to this signer goes via WhatsApp
+```
+
+### H2 — Invalid E.164 phone rejected
+```bash
+curl -X POST http://localhost:5000/api/signers/$DOCUMENT_ID/update-channel \
+  -H "Content-Type: application/json" \
+  -d '{"token": "'$SIGNER_TOKEN'", "phone": "0712345678", "notif_channel": "whatsapp"}'
+
+# Expected: HTTP 400, { error: 'Invalid phone number. Use format: +255712345678' }
+```
+
+---
+
+## I. Delivery Log Tests
+
+### I1 — View notification logs for a document
+```bash
+curl http://localhost:5000/api/notifications/logs/$DOCUMENT_ID \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF"
+
+# Expected: JSON with logs array, phone numbers masked (last 4 digits replaced with ****)
+```
+
+### I2 — Unauthorized user cannot see another's logs
+```bash
+curl http://localhost:5000/api/notifications/logs/$OTHER_USER_DOCUMENT_ID \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF"
+
+# Expected: HTTP 404
+```
+
+---
+
+## J. Template Tests
+
+### J1 — Kiswahili template used when prefs set to 'sw'
+```bash
+# Set language to Kiswahili
+curl -X PUT http://localhost:5000/api/notifications/preferences \
+  -H "Cookie: $SESSION" -H "X-CSRF-Token: $CSRF" \
+  -H "Content-Type: application/json" \
+  -d '{"language": "sw"}'
+
+# Add signer with WhatsApp — verify Kiswahili message received
+# Expected WhatsApp: "Ombi la Saini" (Kiswahili header)
+```
+
+### J2 — Template override in DB takes effect without restart
+```bash
+# Update template in DB
+psql $DATABASE_URL -c "
+UPDATE notification_templates
+SET body = E'NEW TEMPLATE: Please sign {{document_title}}\n{{signing_link}}'
+WHERE key = 'signing_invite_whatsapp_en';
+"
+
+# Reload templates without restart (worker auto-reloads on next job or you can call loadTemplatesFromDb)
+# Send an invite and verify new template text appears
+```
+
+---
+
+## K. Performance Verification
+
+```bash
+# Enqueue 50 simultaneous invite notifications
+node -e "
+const { enqueueNotificationInvite } = require('./src/queues/producers');
+const jobs = Array.from({ length: 50 }, (_, i) =>
+  enqueueNotificationInvite({
+    documentId: 'doc-' + i,
+    signerId: 'signer-' + i,
+    signingLink: 'https://example.com/sign/doc-' + i + '#token=test'
+  })
+);
+Promise.all(jobs).then(() => { console.log('50 jobs queued'); process.exit(0); });
+"
+
+# Monitor throughput in worker logs
+# Expected: ~5 concurrent deliveries, all complete within 30 seconds
+# Check Redis queue depth: redis-cli LLEN bull:notification-delivery:wait
 ```

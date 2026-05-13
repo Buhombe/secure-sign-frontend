@@ -1,148 +1,144 @@
 'use strict';
 
 /**
- * queues/index.js — HakikiSign BullMQ Queue Registry
+ * queues/index.js — HakikiSign BullMQ Queue Registry (v2 — with notification queue)
  *
- * ══════════════════════════════════════════════════════════════════════════════
- * ARCHITECTURE OVERVIEW
- * ══════════════════════════════════════════════════════════════════════════════
+ * CHANGES FROM v1
+ * ─────────────────
+ * + notificationQueue (Queue F) — dedicated WhatsApp/multi-channel notification delivery
  *
- * Five queues, each handling a distinct workload category:
+ * WHY A SEPARATE NOTIFICATION QUEUE?
+ * ─────────────────────────────────────
+ * The existing emailQueue handles only Brevo email delivery.
+ * The new notificationQueue handles:
+ *   1. Channel selection logic (WhatsApp vs email fallback)
+ *   2. WhatsApp-specific retry behaviour (immediate fallback on permanent errors)
+ *   3. Delivery state tracking in notification_logs
+ *   4. Anti-spam coordination for reminders
  *
- *   pdf-processing     — PDF stamping, signature embedding, hash computation
- *   certificate-gen    — Certificate-of-completion PDF generation
- *   email-delivery     — All transactional emails (invite, remind, complete)
- *   audit-security     — Scheduled cleanup, expiration enforcement, integrity checks
- *   crypto-ops         — RSA-2048 key generation (CPU-intensive, isolated)
+ * Keeping these separate means:
+ *   - Email retries (7 attempts, ~10min backoff) don't affect WhatsApp retry policy
+ *   - WhatsApp-specific concurrency can be tuned (Twilio rate limits)
+ *   - Notification analytics are isolated to one queue for dashboards
  *
- * WHY SEPARATE QUEUES?
- * ─────────────────────
- * 1. INDEPENDENT SCALING — each queue gets its own worker concurrency setting.
- *    RSA key gen (CPU-bound) runs concurrency=1; email delivery (I/O-bound)
- *    runs concurrency=10.
- *
- * 2. INDEPENDENT RETRY POLICIES — email uses aggressive backoff (provider
- *    outages); PDF uses fewer retries (data corruption is non-recoverable).
- *
- * 3. OBSERVABILITY — queue-level metrics are meaningful only when queues are
- *    separated. Mixing PDF and email jobs in one queue makes latency metrics
- *    meaningless.
- *
- * 4. FAILURE ISOLATION — a PDF worker crash does not affect email delivery.
- *
- * SHARED CONNECTION POOL
- * ───────────────────────
- * BullMQ requires separate ioredis connections for Queue (producer) and
- * Worker (consumer). This is because Workers use the Redis BLPOP blocking
- * command which cannot multiplex with other commands on the same connection.
- *
- * We create a connection factory so each Queue and Worker gets its own
- * dedicated ioredis instance, all sharing the same configuration.
- *
- * RAILWAY DEPLOYMENT
- * ───────────────────
- * The API server (index.js) runs as one Railway service — it enqueues jobs.
- * Workers run as a SEPARATE Railway service (worker.js) — they process jobs.
- * Both services connect to the same Redis instance via REDIS_URL.
- * This separation means:
- *   - Worker CPU spikes don't affect API response times
- *   - Workers can be scaled independently
- *   - Railway can restart workers without touching the API server
+ * ALL OTHER QUEUES ARE UNCHANGED.
+ * This file is a DROP-IN REPLACEMENT for the original queues/index.js.
  */
 
 const { Queue } = require('bullmq');
 const logger    = require('../config/logger');
 
-// ── Redis connection factory ──────────────────────────────────────────────────
-// Each call returns a NEW ioredis config object (not a shared client).
-// BullMQ creates its own ioredis instances from this config.
 function makeRedisConnection() {
   const url = process.env.REDIS_URL;
   if (!url) {
     logger.warn('[Queues] REDIS_URL not set — BullMQ will not function');
   }
-
-  return {
-    // BullMQ accepts either a connection URL string or ioredis options object.
-    // Using the URL directly is Railway-compatible.
-    ...(url
-      ? { connection: { url } }
-      : { connection: { host: 'localhost', port: 6379 } }
-    ),
-  };
+  return url
+    ? { connection: { url } }
+    : { connection: { host: 'localhost', port: 6379 } };
 }
 
-// ── Default job options ───────────────────────────────────────────────────────
-// These are the BASE defaults. Individual enqueue calls override as needed.
 const BASE_JOB_OPTS = {
-  removeOnComplete: { count: 500 },  // keep last 500 completed jobs for debugging
-  removeOnFail:     { count: 1000 }, // keep last 1000 failed jobs for forensics
+  removeOnComplete: { count: 500 },
+  removeOnFail:     { count: 1000 },
 };
 
-// ── Queue: PDF Processing (Queue A) ──────────────────────────────────────────
+// ── Queue: PDF Processing ─────────────────────────────────────────────────────
 const pdfQueue = new Queue('pdf-processing', {
   ...makeRedisConnection(),
   defaultJobOptions: {
     ...BASE_JOB_OPTS,
-    attempts:    3,
-    backoff: { type: 'exponential', delay: 5_000 },  // 5s, 10s, 20s
-    timeout:     120_000,  // 2 minutes — large PDFs can take time
+    attempts: 3,
+    backoff:  { type: 'exponential', delay: 5_000 },
+    timeout:  120_000,
   },
 });
 
-// ── Queue: Certificate Generation (Queue B) ───────────────────────────────────
+// ── Queue: Certificate Generation ────────────────────────────────────────────
 const certificateQueue = new Queue('certificate-gen', {
   ...makeRedisConnection(),
   defaultJobOptions: {
     ...BASE_JOB_OPTS,
-    attempts:    5,
-    backoff: { type: 'exponential', delay: 3_000 },  // 3s, 6s, 12s, 24s, 48s
-    timeout:     60_000,   // 1 minute
+    attempts: 5,
+    backoff:  { type: 'exponential', delay: 3_000 },
+    timeout:  60_000,
   },
 });
 
-// ── Queue: Email Delivery (Queue C) ──────────────────────────────────────────
+// ── Queue: Email Delivery (UNCHANGED — Brevo/email only) ──────────────────────
 const emailQueue = new Queue('email-delivery', {
   ...makeRedisConnection(),
   defaultJobOptions: {
     ...BASE_JOB_OPTS,
-    attempts:    7,
-    backoff: { type: 'exponential', delay: 10_000 }, // 10s → ~10 min at max
-    timeout:     30_000,   // 30 seconds per email attempt
+    attempts: 7,
+    backoff:  { type: 'exponential', delay: 10_000 },
+    timeout:  30_000,
   },
 });
 
-// ── Queue: Audit & Security (Queue D) ────────────────────────────────────────
+// ── Queue: Audit & Security ───────────────────────────────────────────────────
 const auditQueue = new Queue('audit-security', {
   ...makeRedisConnection(),
   defaultJobOptions: {
     ...BASE_JOB_OPTS,
-    attempts:    3,
-    backoff: { type: 'exponential', delay: 30_000 }, // 30s, 60s, 120s
-    timeout:     300_000,  // 5 minutes — bulk expiration jobs can be slow
+    attempts: 3,
+    backoff:  { type: 'exponential', delay: 30_000 },
+    timeout:  300_000,
   },
 });
 
-// ── Queue: Crypto Operations (Queue E) ───────────────────────────────────────
+// ── Queue: Crypto Operations ──────────────────────────────────────────────────
 const cryptoQueue = new Queue('crypto-ops', {
   ...makeRedisConnection(),
   defaultJobOptions: {
     ...BASE_JOB_OPTS,
-    attempts:    2,
-    backoff: { type: 'fixed', delay: 2_000 },
-    timeout:     30_000,   // RSA-2048 takes ~200ms; 30s is very generous
-    priority:    10,       // high priority — user is waiting for this
+    attempts: 2,
+    backoff:  { type: 'fixed', delay: 2_000 },
+    timeout:  30_000,
+    priority: 10,
+  },
+});
+
+// ── Queue F: Multi-Channel Notification (NEW) ─────────────────────────────────
+//
+// RETRY POLICY DESIGN
+// ────────────────────
+// WhatsApp delivery can fail for two reasons:
+//   a) Transient (Twilio 429, network): retry with backoff → 5 attempts
+//   b) Permanent (invalid phone, opted out): the orchestrator detects this
+//      and falls back to email within the SAME job attempt. No BullMQ retry needed.
+//
+// This means 5 BullMQ attempts is sufficient; permanent failures auto-fallback
+// to email on attempt 1 before BullMQ even sees a failure.
+//
+// CONCURRENCY = 5
+// ────────────────
+// Twilio's WhatsApp API enforces 1 message/second per sender number by default.
+// With concurrency=5 and typical message send times of ~300ms, throughput
+// is ~3-4 msg/sec — within limits for the sandbox and basic Business plans.
+// Upgrade Twilio tier and raise concurrency for higher volume.
+const notificationQueue = new Queue('notification-delivery', {
+  ...makeRedisConnection(),
+  defaultJobOptions: {
+    ...BASE_JOB_OPTS,
+    attempts: 5,
+    backoff: {
+      type: 'custom',
+      // Custom: immediate retry for first failure (likely transient);
+      // exponential from attempt 2 onward
+    },
+    timeout: 45_000,
   },
 });
 
 // ── Queue health logging ──────────────────────────────────────────────────────
-// Log queue errors — BullMQ emits 'error' on connection failures.
 [
-  { name: 'pdf-processing',  q: pdfQueue },
-  { name: 'certificate-gen', q: certificateQueue },
-  { name: 'email-delivery',  q: emailQueue },
-  { name: 'audit-security',  q: auditQueue },
-  { name: 'crypto-ops',      q: cryptoQueue },
+  { name: 'pdf-processing',       q: pdfQueue },
+  { name: 'certificate-gen',      q: certificateQueue },
+  { name: 'email-delivery',       q: emailQueue },
+  { name: 'audit-security',       q: auditQueue },
+  { name: 'crypto-ops',           q: cryptoQueue },
+  { name: 'notification-delivery', q: notificationQueue },
 ].forEach(({ name, q }) => {
   q.on('error', (err) => {
     logger.error(`[Queue:${name}] Error`, { message: err.message });
@@ -158,6 +154,7 @@ async function closeQueues() {
     emailQueue.close(),
     auditQueue.close(),
     cryptoQueue.close(),
+    notificationQueue.close(),
   ]);
   logger.info('[Queues] All queues closed');
 }
@@ -168,6 +165,7 @@ module.exports = {
   emailQueue,
   auditQueue,
   cryptoQueue,
+  notificationQueue,
   makeRedisConnection,
   closeQueues,
 };

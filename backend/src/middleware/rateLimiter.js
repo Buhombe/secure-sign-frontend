@@ -188,7 +188,11 @@ function makeDualStore(redisStore, fallbackStore, limiterName) {
 
   return {
     init(options) {
-      redisStore.init(options);
+      try {
+        if (isRedisReady()) redisStore.init(options);
+      } catch (e) {
+        // Redis not ready at init time — will use fallback
+      }
       fallbackStore.init(options);
       _initialised = true;
     },
